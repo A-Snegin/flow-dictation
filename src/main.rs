@@ -78,6 +78,25 @@ fn main() {
             }
             return;
         }
+        Some("--settings-selftest") => {
+            let text = args[1..].join("
+");
+            let (current, _) = Settings::load();
+            let saved = flow::settings_ui::test_roundtrip(&current, &text);
+            println!("saved: {saved}");
+            let (after, _) = Settings::load();
+            println!("entries now on disk: {}", after.dictionary.len());
+            let mut e: Vec<(&String, &String)> = after.dictionary.iter().collect();
+            e.sort();
+            for (k, v) in e {
+                println!("  \"{k}\" -> \"{v}\"");
+            }
+            return;
+        }
+        Some("--dictionary") => {
+            let text = args[1..].join(" ");
+            return explain_dictionary(&text);
+        }
         Some("--which-app") => {
             let (settings, _) = Settings::load();
             let exe = target_app::foreground_executable();
@@ -100,7 +119,8 @@ fn main() {
                  flow-core --dictate N    capture N seconds, transcribe, print (no insertion)
                  flow-core --which-app    report the focused app and how text would be inserted
                  flow-core --overlay-demo N  drive the pill with a synthetic voice for N seconds
-                 flow-core --settings     open the settings window on its own"
+                 flow-core --settings     open the settings window on its own
+                 flow-core --dictionary \"text\"  show what the dictionary does to a phrase"
             );
             return;
         }
@@ -893,4 +913,59 @@ fn overlay_demo(secs: u64) {
     overlay.set(OverlayState::Done, "and this is the confirmation");
     std::thread::sleep(Duration::from_millis(1200));
     overlay.set(OverlayState::Hidden, "");
+}
+
+/// Shows exactly what the dictionary does, on text you supply.
+///
+/// It does two separate jobs from one list, which is worth being able to see:
+/// the written forms are handed to the recogniser as key terms so it is more
+/// likely to produce them in the first place, and the same list corrects the
+/// output afterwards if it did not.
+fn explain_dictionary(text: &str) {
+    let (settings, problem) = Settings::load();
+    if let Some(p) = problem {
+        eprintln!("settings: {p}");
+    }
+
+    let mut formatter = Formatter::default();
+    formatter.capitalise_sentences = settings.formatting.capitalise_sentences;
+    formatter.spoken_punctuation = settings.formatting.spoken_punctuation;
+    formatter.trailing_space = settings.formatting.trailing_space;
+    formatter.set_dictionary(&settings.dictionary);
+
+    println!("dictionary: {} entries", settings.dictionary.len());
+    if settings.dictionary.is_empty() {
+        println!("  (empty, so it changes nothing. Add entries in the settings window.)");
+    } else {
+        let mut entries: Vec<(&String, &String)> = settings.dictionary.iter().collect();
+        entries.sort();
+        for (spoken, written) in entries {
+            println!("  heard \"{spoken}\"  ->  written \"{written}\"");
+        }
+        println!();
+        println!("sent to the recogniser as key terms (bias {}):", settings.model.keyterm_boost);
+        println!("  {}", formatter.keyterms());
+    }
+
+    println!();
+    println!("formatting: capitals {}, spoken punctuation {}, trailing space {}",
+        settings.formatting.capitalise_sentences,
+        settings.formatting.spoken_punctuation,
+        settings.formatting.trailing_space);
+
+    let samples: Vec<String> = if text.trim().is_empty() {
+        vec![
+            "hello there comma this is a test full stop".to_string(),
+            "we ship on friday new line then we review".to_string(),
+        ]
+    } else {
+        vec![text.to_string()]
+    };
+
+    println!();
+    for sample in samples {
+        println!("as recognised: {sample}");
+        println!("as inserted:   {}", formatter.format(&sample));
+        println!();
+    }
 }

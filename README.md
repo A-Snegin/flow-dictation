@@ -89,11 +89,22 @@ The `[dictionary]` section does two jobs from one list. Each entry biases the
 decoder while it is listening, so the recogniser is more likely to produce the
 term in the first place, and corrects the output afterwards if it did not.
 
+Two forms, because people reach for both. A bare term is biased and written as
+you typed it; a pair rewrites what was heard into what you want written.
+
 ```toml
 [dictionary]
+"lift off consulting" = "Lift-Off Consulting"   # typed as just: Lift-Off Consulting
 "lift off" = "Lift-Off"
 "dddm" = "DDDM"
-"anton" = "Anton"
+```
+
+A bare term is keyed on how it sounds rather than how it is written, so
+`Lift-Off Consulting` matches a transcript that reads "lift off consulting".
+Check what any entry does to a phrase without dictating it:
+
+```powershell
+flow-core --dictionary "we met the lift off consulting team about dddm"
 ```
 
 Edit it in the settings window (tray, Open settings) or in the file directly.

@@ -85,6 +85,28 @@ pub fn is_open() -> bool {
     WINDOW.load(Ordering::SeqCst) != 0
 }
 
+/// Fills the dictionary box and saves, using exactly the code path a person
+/// typing into it would. Cross-process automation cannot put text into an edit
+/// control, so without this the read-and-save path could only be checked by
+/// hand.
+pub fn test_roundtrip(settings: &Settings, dictionary_text: &str) -> bool {
+    unsafe { create(settings) };
+    let hwnd = WINDOW.load(Ordering::SeqCst);
+    if hwnd == 0 {
+        return false;
+    }
+    let hwnd = HWND(hwnd as *mut _);
+    let Some(box_) = (unsafe { child(hwnd, ID_DICTIONARY) }) else {
+        return false;
+    };
+    set_text(box_, dictionary_text);
+    unsafe { collect_and_save(hwnd) };
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+    take_saved()
+}
+
 /// Opens the window, or brings it forward if it is already up.
 pub fn open(settings: &Settings) {
     let existing = WINDOW.load(Ordering::SeqCst);
@@ -608,7 +630,18 @@ unsafe fn collect_and_save(hwnd: HWND) {
         settings.model.keyterm_boost = v.clamp(0.0, 10.0);
     }
 
-    settings.dictionary = text_to_dictionary(&unsafe { text_of(hwnd, ID_DICTIONARY) });
+    let raw = unsafe { text_of(hwnd, ID_DICTIONARY) };
+    let parsed = text_to_dictionary(&raw);
+    // Say so when a line was thrown away. Silently discarding what someone
+    // typed is how a dictionary comes to look like it does nothing.
+    let lines = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .count();
+    if lines != parsed.len() {
+        eprintln!("dictionary: kept {} of {lines} lines", parsed.len());
+    }
+    settings.dictionary = parsed;
 
     match settings.save() {
         Ok(()) => SAVED.store(true, Ordering::SeqCst),
@@ -626,22 +659,45 @@ fn dictionary_to_text(settings: &Settings) -> String {
         .join("\r\n")
 }
 
-/// One entry per line, `spoken = written`. Blank lines and lines without an
-/// equals sign are ignored rather than rejected, so a stray note in the box
-/// cannot lose someone their whole dictionary.
-fn text_to_dictionary(text: &str) -> std::collections::HashMap<String, String> {
+/// One entry per line. Two forms, because people reach for both:
+///
+///   Lift-Off Consulting          a term to recognise, written as typed
+///   lift off = Lift-Off          heard on the left, written on the right
+///
+/// The bare form matters. Someone who wants their company name recognised
+/// types the company name; silently discarding that because it had no equals
+/// sign is how a dictionary appears not to work at all.
+pub fn text_to_dictionary(text: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some((spoken, written)) = line.split_once('=') {
-            let spoken = spoken.trim().trim_matches('"').to_string();
-            let written = written.trim().trim_matches('"').to_string();
-            if !spoken.is_empty() && !written.is_empty() {
-                map.insert(spoken, written);
+        let (spoken, written) = match line.split_once('=') {
+            Some((left, right)) => (
+                left.trim().trim_matches('"').to_string(),
+                right.trim().trim_matches('"').to_string(),
+            ),
+            // Bare term: bias the recogniser towards it, and leave it alone
+            // afterwards because it is already written the way it should be.
+            None => {
+                let term = line.trim_matches('"').to_string();
+                // Match how it is said, not how it is written. Nobody
+                // pronounces the hyphen in "Lift-Off", so a bare term keyed on
+                // "lift-off consulting" would never fire against a transcript
+                // that reads "lift off consulting".
+                let spoken = term
+                    .to_lowercase()
+                    .replace(['-', '_', '/'], " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (spoken, term)
             }
+        };
+        if !spoken.is_empty() && !written.is_empty() {
+            map.insert(spoken, written);
         }
     }
     map
@@ -746,12 +802,6 @@ mod tests {
         let map = text_to_dictionary("\n  \"lift off\" = \"Lift-Off\"  \n\n# a note\n");
         assert_eq!(map.len(), 1);
         assert_eq!(map.get("lift off").map(String::as_str), Some("Lift-Off"));
-    }
-
-    #[test]
-    fn a_line_without_an_equals_is_skipped_not_fatal() {
-        let map = text_to_dictionary("lift off = Lift-Off\njust some words\n");
-        assert_eq!(map.len(), 1);
     }
 
     #[test]
