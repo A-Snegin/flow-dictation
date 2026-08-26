@@ -10,6 +10,7 @@ pub mod inject;
 pub mod overlay;
 pub mod settings;
 pub mod stats;
+pub mod target_app;
 pub mod trace;
 pub mod tray;
 pub mod wav;

@@ -58,6 +58,7 @@ impl Default for Config {
 enum Cmd {
     Begin,
     Release,
+    SetKeyterms(String),
     Shutdown,
 }
 
@@ -131,6 +132,12 @@ impl AsrService {
         }
     }
 
+    /// Replaces the decoder's biasing terms. Applied by the worker between
+    /// utterances, so it never interrupts one in progress.
+    pub fn set_keyterms(&self, terms: &str) {
+        let _ = self.cmd.send(Cmd::SetKeyterms(terms.to_string()));
+    }
+
     /// A handle the capture thread can own. The service itself holds an mpsc
     /// Receiver and so is not Sync; the audio path needs neither.
     pub fn audio_sink(&self) -> AudioSink {
@@ -197,6 +204,12 @@ fn worker_loop(
         match cmd_rx.recv() {
             Ok(Cmd::Begin) => {}
             Ok(Cmd::Release) => continue,
+            Ok(Cmd::SetKeyterms(terms)) => {
+                if let Err(e) = transcriber.set_keyterms(&terms) {
+                    let _ = ev_tx.send(Event::Error(format!("keyterms rejected: {e}")));
+                }
+                continue;
+            }
             Ok(Cmd::Shutdown) | Err(_) => return,
         }
 
@@ -229,7 +242,7 @@ fn worker_loop(
                     break;
                 }
                 Ok(Cmd::Shutdown) => return,
-                Ok(Cmd::Begin) => {}
+                Ok(Cmd::Begin) | Ok(Cmd::SetKeyterms(_)) => {}
                 Err(_) => {}
             }
 

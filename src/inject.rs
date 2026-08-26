@@ -156,6 +156,15 @@ fn type_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Reading and writing the clipboard directly, exposed for the injection test.
+pub fn clipboard_text() -> Option<String> {
+    read_clipboard_text()
+}
+
+pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+    write_clipboard_text(text)
+}
+
 fn read_clipboard_text() -> Option<String> {
     unsafe {
         if OpenClipboard(Some(HWND::default())).is_err() {

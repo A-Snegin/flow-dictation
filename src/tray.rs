@@ -26,6 +26,7 @@ pub enum TrayCommand {
     Toggle,
     LatencyReport,
     OpenSettings,
+    ReloadDictionary,
     Quit,
 }
 
@@ -33,7 +34,8 @@ const WM_TRAY: u32 = 0x0400 + 1; // WM_APP + 1
 const ID_TOGGLE: usize = 1;
 const ID_REPORT: usize = 2;
 const ID_SETTINGS: usize = 3;
-const ID_QUIT: usize = 4;
+const ID_RELOAD: usize = 4;
+const ID_QUIT: usize = 5;
 
 static SENDER: OnceLock<Mutex<Sender<TrayCommand>>> = OnceLock::new();
 static CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -164,6 +166,7 @@ unsafe fn show_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, ID_TOGGLE, w!("Pause / resume dictation"));
         let _ = AppendMenuW(menu, MF_STRING, ID_REPORT, w!("Latency report"));
         let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Open settings"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("Reload dictionary"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, w!("Quit Flow"));
 
@@ -187,6 +190,7 @@ unsafe fn show_menu(hwnd: HWND) {
             ID_TOGGLE => Some(TrayCommand::Toggle),
             ID_REPORT => Some(TrayCommand::LatencyReport),
             ID_SETTINGS => Some(TrayCommand::OpenSettings),
+            ID_RELOAD => Some(TrayCommand::ReloadDictionary),
             ID_QUIT => Some(TrayCommand::Quit),
             _ => None,
         };

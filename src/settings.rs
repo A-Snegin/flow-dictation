@@ -50,8 +50,17 @@ pub struct Model {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Insertion {
-    /// "paste" or "type"
+    /// "paste" or "type", for ordinary applications.
     pub mode: String,
+    /// Terminals get their own mode. Typing is the safe default there: paste
+    /// keybindings vary between consoles and remote-desktop clients, while
+    /// synthesised Unicode keystrokes work anywhere a console reads input.
+    pub terminal_mode: String,
+    /// Extra executables to treat as terminals, on top of the built-in list.
+    pub terminal_apps: Vec<String>,
+    /// At a shell prompt a line break is the Enter key, so dictating "new
+    /// line" would run the command. Inside a terminal, breaks become this.
+    pub terminal_newline_replacement: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +96,9 @@ impl Default for Insertion {
     fn default() -> Self {
         Insertion {
             mode: "paste".into(),
+            terminal_mode: "type".into(),
+            terminal_apps: Vec::new(),
+            terminal_newline_replacement: " ".into(),
         }
     }
 }
@@ -151,11 +163,16 @@ impl Settings {
         }
         let body = toml::to_string_pretty(self).unwrap_or_default();
         let commented = format!(
-            "# Flow settings. Edit and choose Reload settings from the tray menu.\n\
+            "# Flow settings.\n\
+             # Dictionary and formatting changes apply from the tray: Reload dictionary.\n\
+             # Hotkey and model changes need Flow restarted.\n\
              #\n\
              # hotkey.key            rightctrl | rightalt | rightshift | f13 | capslock | leftctrl\n\
              # model.profile         fast (tiny, roughly twice as quick) | balanced (small)\n\
              # insertion.mode        paste (default, flat cost) | type (for apps that block paste)\n\
+             # insertion.terminal_mode  how to insert into PowerShell, cmd, Windows Terminal and\n\
+             #                       friends. Typing is the default there, and line breaks are\n\
+             #                       replaced with a space so a dictation can never run a command.\n\
              #\n\
              # [dictionary] entries bias the recogniser and correct the output.\n\
              # Spoken form on the left, exactly what you want written on the right:\n\

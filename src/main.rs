@@ -17,7 +17,8 @@ use flow::format::Formatter;
 use flow::hotkey::{self, HotkeyEvent};
 use flow::inject;
 use flow::overlay::{Overlay, OverlayState};
-use flow::settings::Settings;
+use flow::settings::{Insertion, Settings};
+use flow::target_app;
 use flow::trace::{self, Utterance};
 use flow::tray::{Tray, TrayCommand};
 
@@ -36,11 +37,27 @@ fn main() {
             let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
             return dictate_once(secs);
         }
+        Some("--which-app") => {
+            let (settings, _) = Settings::load();
+            let exe = target_app::foreground_executable();
+            let terminal = target_app::is_terminal(&exe, &settings.insertion.terminal_apps);
+            println!("foreground application: {}", if exe.is_empty() { "unknown".into() } else { exe });
+            println!("treated as a terminal:  {terminal}");
+            println!(
+                "insertion would use:    {}",
+                if terminal { &settings.insertion.terminal_mode } else { &settings.insertion.mode }
+            );
+            if terminal {
+                println!("line breaks replaced with {:?} so nothing can be executed", settings.insertion.terminal_newline_replacement);
+            }
+            return;
+        }
         Some("--help") | Some("-h") => {
             println!(
                 "flow-core                run the tray app\n\
                  flow-core --mic-test N   capture N seconds and report the audio path\n\
-                 flow-core --dictate N    capture N seconds, transcribe, print (no insertion)"
+                 flow-core --dictate N    capture N seconds, transcribe, print (no insertion)
+                 flow-core --which-app    report the focused app and how text would be inserted"
             );
             return;
         }
@@ -68,7 +85,7 @@ fn main() {
         );
         hotkey::vk::RCONTROL
     });
-    let insert_mode = inject::Mode::from_name(&settings.insertion.mode);
+    let insertion = settings.insertion.clone();
 
     // ---- Warm everything before the user can possibly press the key -------
     let boot = Instant::now();
@@ -130,10 +147,13 @@ fn main() {
     });
 
     println!(
-        "Ready in {:?}. Hold {} to dictate. Insertion: {:?}.",
+        "Ready in {:?}. Hold {} to dictate.",
         boot.elapsed(),
-        settings.hotkey.key,
-        insert_mode
+        settings.hotkey.key
+    );
+    println!(
+        "Insertion: {} normally, {} in terminals.",
+        insertion.mode, insertion.terminal_mode
     );
     println!("Settings: {}", Settings::path().display());
 
@@ -161,7 +181,7 @@ fn main() {
     let mut app = App {
         asr,
         formatter,
-        insert_mode,
+        insertion,
         capture,
         utterance: None,
         enabled: true,
@@ -197,6 +217,31 @@ fn main() {
                     .args(["/C", "start", "", &Settings::path().to_string_lossy()])
                     .spawn();
             }
+            Some(TrayCommand::ReloadDictionary) => {
+                // Dictionary, formatting and insertion reload live. The hotkey
+                // and the model do not: one is hooked, the other is a warmed
+                // ONNX session, and silently rebuilding either mid-session
+                // would cost more than restarting.
+                let (fresh, problem) = Settings::load();
+                if let Some(p) = problem {
+                    eprintln!("settings: {p}");
+                } else {
+                    if let Ok(mut f) = app.formatter.lock() {
+                        f.capitalise_sentences = fresh.formatting.capitalise_sentences;
+                        f.spoken_punctuation = fresh.formatting.spoken_punctuation;
+                        f.trailing_space = fresh.formatting.trailing_space;
+                        f.set_dictionary(&fresh.dictionary);
+                        app.asr.set_keyterms(&f.keyterms());
+                    }
+                    app.insertion = fresh.insertion.clone();
+                    println!(
+                        "Reloaded: {} dictionary entries, insertion {} / {} in terminals.",
+                        fresh.dictionary.len(),
+                        fresh.insertion.mode,
+                        fresh.insertion.terminal_mode
+                    );
+                }
+            }
             None => {}
         }
 
@@ -212,7 +257,7 @@ fn main() {
 struct App {
     asr: Arc<AsrService>,
     formatter: Arc<Mutex<Formatter>>,
-    insert_mode: inject::Mode,
+    insertion: Insertion,
     /// Open for the life of the process, started only while the key is held.
     capture: Option<Capture>,
     utterance: Option<Utterance>,
@@ -312,7 +357,24 @@ impl App {
                         u.t12_inserted = trace::now();
                         self.overlay.set(OverlayState::Hidden, "");
                     } else {
-                        if let Err(e) = inject::insert(&formatted, self.insert_mode) {
+                        // Decide per target: a shell prompt is not a document.
+                        let exe = target_app::foreground_executable();
+                        let terminal =
+                            target_app::is_terminal(&exe, &self.insertion.terminal_apps);
+                        let (mode_name, formatted) = if terminal {
+                            (
+                                self.insertion.terminal_mode.as_str(),
+                                target_app::strip_newlines(
+                                    &formatted,
+                                    &self.insertion.terminal_newline_replacement,
+                                ),
+                            )
+                        } else {
+                            (self.insertion.mode.as_str(), formatted)
+                        };
+                        let mode = inject::Mode::from_name(mode_name);
+                        u.chars = formatted.chars().count();
+                        if let Err(e) = inject::insert(&formatted, mode) {
                             eprintln!("insertion failed: {e}");
                             self.overlay.set(OverlayState::Error, &e);
                         }
