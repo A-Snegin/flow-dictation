@@ -1,15 +1,23 @@
 //! The floating status pill: the only thing Flow puts on screen.
 //!
+//! A slim black bar low on the screen. Left to right: a recording dot, a live
+//! waveform, the words as they are recognised with a caret at the end, and a
+//! reminder of which key is being held.
+//!
 //! What it has to answer, in order of how much it matters:
 //!   1. Is it listening right now, so my words are not being wasted?
-//!   2. Is my voice actually reaching it? (a live meter, not a static dot)
+//!   2. Is my voice actually reaching it? (a live trace, not a static dot)
 //!   3. Am I seeing what I just said, rather than what I said first?
 //!   4. Did the text land, or did I lose a sentence?
 //!
 //! Drawn with GDI into a 32-bit DIB and pushed with `UpdateLayeredWindow`.
-//! Not Direct2D: this is a rounded rectangle, a few bars and one line of text,
+//! Not Direct2D: this is a rounded rectangle, some bars and a line of text,
 //! repainted 25 times a second and only while the key is held. A D2D device and
 //! swap chain would cost more memory and startup than the rest of the process.
+//!
+//! Everything that can be built once is: fonts, the memory DC, the bitmap and
+//! the rounded-corner alpha mask. Per frame there is drawing and a single pass
+//! over the pixels. Idle CPU with Flow resident measures zero.
 //!
 //! Three Win32 details this depends on, all of which were wrong at first:
 //!
@@ -19,11 +27,10 @@
 //!
 //! `ULW_ALPHA` needs a real `BLENDFUNCTION` and premultiplied pixels. GDI
 //! leaves the alpha byte at zero on everything it draws, so the bitmap is
-//! post-processed: coverage comes from the rounded-rectangle shape, RGB is
-//! multiplied by it, and that becomes the alpha channel.
+//! post-processed against a precomputed coverage mask.
 //!
 //! ClearType cannot be used on a layered window. It assumes an opaque
-//! background and leaves coloured fringes along the alpha edges, so the font is
+//! background and leaves coloured fringes along the alpha edges, so fonts are
 //! created with `ANTIALIASED_QUALITY`.
 //!
 //! `WS_EX_NOACTIVATE` matters more than it looks. If this window ever took
@@ -37,11 +44,11 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject,
-    DrawTextW, FillRect, GetDC, GetStockObject, ReleaseDC, RoundRect, SelectObject, SetBkMode,
-    SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, BLENDFUNCTION, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS,
-    DT_CALCRECT, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, HBITMAP, HDC, HFONT,
-    HGDIOBJ, NULL_PEN, OUT_DEFAULT_PRECIS, TRANSPARENT,
+    DrawTextW, Ellipse, FillRect, GetDC, GetStockObject, ReleaseDC, RoundRect, SelectObject,
+    SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DIB_RGB_COLORS, DT_CALCRECT, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FW_MEDIUM, FW_SEMIBOLD,
+    HBITMAP, HBRUSH, HDC, HFONT, NULL_PEN, OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
@@ -64,14 +71,36 @@ pub enum OverlayState {
     Error,
 }
 
-const DONE_LINGER: Duration = Duration::from_millis(1100);
-const ERROR_LINGER: Duration = Duration::from_millis(3500);
-/// 25 fps. Enough for the meter to read as fluid, cheap enough not to matter,
-/// and only ever running while the pill is on screen.
+const DONE_LINGER: Duration = Duration::from_millis(1000);
+const ERROR_LINGER: Duration = Duration::from_millis(3000);
+/// 25 fps: fluid enough to read as live, cheap enough not to matter, and only
+/// ever running while the pill is on screen.
 pub const LISTENING_TICK: Duration = Duration::from_millis(40);
 
-/// Bars in the voice meter. Odd number so there is a centre.
-const BARS: usize = 5;
+/// Bars in the waveform. Thin and many, so it reads as a voice trace rather
+/// than a level meter.
+const BARS: usize = 11;
+
+/// Fixed per-bar weights. A flat envelope looks synthetic; this gives the trace
+/// the uneven shape a real waveform has, while staying identical frame to frame
+/// so only the level and the travelling wave move.
+const BAR_WEIGHT: [f32; BARS] = [
+    0.42, 0.68, 0.50, 0.88, 0.60, 1.00, 0.55, 0.92, 0.48, 0.72, 0.40,
+];
+
+// COLORREF is 0x00BBGGRR.
+const COL_BG: COLORREF = COLORREF(0x00_1C_1D_1E);
+const COL_ACCENT: COLORREF = COLORREF(0x00_3C_60_F0); // coral
+const COL_DONE: COLORREF = COLORREF(0x00_6A_C4_57);
+const COL_ERROR: COLORREF = COLORREF(0x00_4D_48_E5);
+const COL_TEXT: COLORREF = COLORREF(0x00_F2_F2_F2);
+const COL_TEXT_LIVE: COLORREF = COLORREF(0x00_D6_D6_D6);
+const COL_HINT: COLORREF = COLORREF(0x00_8E_8E_8E);
+const COL_KEYCAP: COLORREF = COLORREF(0x00_36_38_3A);
+const COL_KEYCAP_TEXT: COLORREF = COLORREF(0x00_D8_D8_D8);
+const COL_WAVE: COLORREF = COLORREF(0x00_9A_9A_9A);
+/// The background again, in BGR byte order, for the pixel passes.
+const BG_BYTES: [u8; 3] = [0x1E, 0x1D, 0x1C];
 
 pub struct Overlay {
     hwnd: Option<HWND>,
@@ -79,37 +108,36 @@ pub struct Overlay {
     text: String,
     /// Smoothed 0..1 microphone level.
     level: f32,
-    /// Per-bar heights, each chasing the level with its own lag so the group
+    /// Per-bar heights, each chasing the level with its own lag so the trace
     /// undulates instead of moving as one block.
     bars: [f32; BARS],
     /// Advances every tick and drives the travelling wave through the bars.
     phase: f32,
     shown_at: Instant,
     visible: bool,
+    /// Which key the user is holding, drawn on the right as a reminder.
+    hint_key: String,
     scale: f32,
     /// Fixed. The pill never resizes: a shape that grows and shrinks as words
     /// arrive is movement at the edge of vision, which is the opposite of what
     /// an unobtrusive indicator should be. Long sentences scroll inside it.
     width: i32,
     height: i32,
-    /// Fonts, the memory DC and the bitmap are built once and reused. At 25 fps
-    /// creating them per frame would be the most expensive thing the process
-    /// does while the key is held, for no reason: none of them ever change.
     gdi: Option<Gdi>,
 }
 
-/// GDI objects held for the life of the overlay. Only ever touched from the
-/// message thread, which is where the window lives.
+/// Everything that can be built once. Only touched from the message thread,
+/// which is where the window lives.
 struct Gdi {
     mem_dc: HDC,
     bitmap: HBITMAP,
     bits: *mut u8,
     text_font: HFONT,
-    icon_font: HFONT,
-    /// True when the icon font resolved to a face that actually has the glyph.
-    icon_ok: bool,
-    bg_brush: windows::Win32::Graphics::Gdi::HBRUSH,
-    bolt_w: i32,
+    hint_font: HFONT,
+    bg_brush: HBRUSH,
+    /// Precomputed rounded-corner coverage, one byte per pixel. Computing it
+    /// per frame meant a square root per pixel for a shape that never changes.
+    mask: Vec<u8>,
 }
 
 static CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -127,6 +155,7 @@ impl Overlay {
             phase: 0.0,
             shown_at: Instant::now(),
             visible: false,
+            hint_key: "Ctrl".into(),
             scale: 1.0,
             width: 0,
             height: 0,
@@ -134,12 +163,12 @@ impl Overlay {
         }
     }
 
-    pub fn create() -> Result<Overlay, String> {
+    pub fn create(hint_key: &str) -> Result<Overlay, String> {
         unsafe {
             let dpi = GetDpiForSystem();
             let scale = (dpi as f32 / 96.0).clamp(1.0, 3.0);
-            let width = (430.0 * scale) as i32;
-            let height = (52.0 * scale) as i32;
+            let width = (560.0 * scale) as i32;
+            let height = (44.0 * scale) as i32;
 
             let instance = GetModuleHandleW(None).map_err(|e| e.to_string())?;
             if !CLASS_REGISTERED.swap(true, Ordering::SeqCst) {
@@ -176,8 +205,6 @@ impl Overlay {
 
             // Deliberately no SetLayeredWindowAttributes here.
 
-            let gdi = Gdi::create(width, height, scale);
-
             Ok(Overlay {
                 hwnd: Some(hwnd),
                 state: OverlayState::Hidden,
@@ -187,10 +214,11 @@ impl Overlay {
                 phase: 0.0,
                 shown_at: Instant::now(),
                 visible: false,
+                hint_key: hint_key.to_string(),
                 scale,
                 width,
                 height,
-                gdi,
+                gdi: Gdi::create(width, height, scale),
             })
         }
     }
@@ -200,7 +228,7 @@ impl Overlay {
     }
 
     /// Live microphone level, 0..1. Fast attack so a syllable registers at
-    /// once, slow release so the meter does not look dead between words.
+    /// once, slow release so the trace does not look dead between words.
     pub fn set_level(&mut self, level: f32) {
         let target = level.clamp(0.0, 1.0);
         self.level = if target > self.level {
@@ -238,7 +266,7 @@ impl Overlay {
                 Some(LISTENING_TICK)
             }
             OverlayState::Finalising => {
-                // Keep the bars moving as they settle, so the moment between
+                // Keep the trace moving as it settles, so the moment between
                 // release and text does not look like a freeze.
                 self.set_level(0.0);
                 self.advance();
@@ -265,25 +293,23 @@ impl Overlay {
         }
     }
 
-    /// One animation step. Each bar chases a travelling wave scaled by the
-    /// current level, and lags by an amount that grows towards the edges, which
-    /// is what makes the group look like liquid rather than a bar chart.
+    /// One animation step. Each bar chases its own weight scaled by the live
+    /// level and a travelling wave, lagging by an amount that grows towards the
+    /// edges, which is what makes the trace look fluid rather than mechanical.
     fn advance(&mut self) {
-        self.phase += 0.30;
+        self.phase += 0.34;
         if self.phase > std::f32::consts::TAU * 64.0 {
             self.phase -= std::f32::consts::TAU * 64.0;
         }
-        // A floor so the meter breathes gently rather than flatlining in a
-        // quiet room: it should look alive, not broken.
-        let energy = (self.level * 1.25).min(1.0).max(0.06);
+        // A floor so the trace breathes gently rather than flatlining: a quiet
+        // room should not look like a broken application.
+        let energy = (self.level * 1.3).min(1.0).max(0.05);
+        let centre = (BARS as f32 - 1.0) / 2.0;
         for i in 0..BARS {
-            let centre = (BARS as f32 - 1.0) / 2.0;
-            let from_centre = (i as f32 - centre).abs() / centre.max(1.0);
-            // Centre bars taller, edges shorter, plus a phase offset per bar.
-            let shape = 1.0 - 0.45 * from_centre;
-            let wave = (self.phase - i as f32 * 0.75).sin() * 0.5 + 0.5;
-            let target = (energy * shape * (0.45 + 0.55 * wave)).clamp(0.04, 1.0);
-            let lag = 0.55 - 0.10 * from_centre;
+            let from_centre = (i as f32 - centre).abs() / centre;
+            let wave = (self.phase - i as f32 * 0.55).sin() * 0.5 + 0.5;
+            let target = (energy * BAR_WEIGHT[i] * (0.40 + 0.60 * wave)).clamp(0.03, 1.0);
+            let lag = 0.55 - 0.12 * from_centre;
             self.bars[i] += (target - self.bars[i]) * lag;
         }
     }
@@ -308,124 +334,192 @@ impl Overlay {
 
     unsafe fn paint(&self, hwnd: HWND) {
         let Some(g) = self.gdi.as_ref() else { return };
-        let w = self.width;
-        let h = self.height;
-        let s = self.scale;
-        let pad = (17.0 * s) as i32;
-        let gap = (13.0 * s) as i32;
-        let mem_dc = g.mem_dc;
+        let (w, h, s) = (self.width, self.height, self.scale);
+        let dc = g.mem_dc;
+        let px = |v: f32| (v * s).round() as i32;
 
-        let (accent, label) = match self.state {
-            // COLORREF is 0x00BBGGRR.
-            OverlayState::Listening => (COLORREF(0x00_6A_E0_53), "Listening"),
-            OverlayState::Finalising => (COLORREF(0x00_30_C0_FF), "Transcribing"),
-            OverlayState::Done => (COLORREF(0x00_6A_E0_53), "Inserted"),
-            OverlayState::Error => (COLORREF(0x00_55_55_FF), "Nothing heard"),
-            OverlayState::Hidden => (COLORREF(0), ""),
+        let accent = match self.state {
+            OverlayState::Done => COL_DONE,
+            OverlayState::Error => COL_ERROR,
+            _ => COL_ACCENT,
         };
+        let live = matches!(self.state, OverlayState::Listening | OverlayState::Finalising);
 
-        let show_meter = matches!(self.state, OverlayState::Listening | OverlayState::Finalising);
-        let bar_w = (3.0 * s).round().max(2.0) as i32;
-        let bar_gap = (4.0 * s).round().max(2.0) as i32;
-        let meter_w = if show_meter {
-            bar_w * BARS as i32 + bar_gap * (BARS as i32 - 1)
-        } else {
-            0
-        };
-        let text_left = pad + g.bolt_w + gap + if show_meter { meter_w + gap } else { 0 };
-        let text_max = (w - pad - text_left).max(0);
-
-        let body = if self.text.trim().is_empty() {
-            label.to_string()
-        } else {
-            self.text.trim().to_string()
-        };
-
-        // ---- draw ---------------------------------------------------------
-        let full = RECT { left: 0, top: 0, right: w, bottom: h };
         unsafe {
-            FillRect(mem_dc, &full, g.bg_brush);
-            SetBkMode(mem_dc, TRANSPARENT);
+            let full = RECT { left: 0, top: 0, right: w, bottom: h };
+            FillRect(dc, &full, g.bg_brush);
+            SetBkMode(dc, TRANSPARENT);
         }
 
-        // Lightning bolt in the accent colour.
-        if g.icon_ok {
-            unsafe {
-                SelectObject(mem_dc, g.icon_font.into());
-                SetTextColor(mem_dc, accent);
-            }
-            let mut glyph = vec![BOLT_GLYPH];
-            let mut r = RECT { left: pad, top: 0, right: pad + g.bolt_w, bottom: h };
-            unsafe {
-                DrawTextW(mem_dc, &mut glyph, &mut r, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-            }
+        // ---- recording dot -------------------------------------------------
+        let pad = px(17.0);
+        let dot_r = px(5.0);
+        let dot_dim = if self.state == OverlayState::Finalising { 0.55 } else { 1.0 };
+        unsafe {
+            let brush = CreateSolidBrush(dim(accent, dot_dim));
+            let old_brush = SelectObject(dc, brush.into());
+            let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+            let _ = Ellipse(dc, pad, h / 2 - dot_r, pad + dot_r * 2, h / 2 + dot_r);
+            SelectObject(dc, old_pen);
+            SelectObject(dc, old_brush);
+            let _ = DeleteObject(brush.into());
         }
 
-        // Voice meter: rounded bars, symmetric about the middle.
-        if show_meter {
-            let meter_left = pad + g.bolt_w + gap;
-            let max_bar_h = (22.0 * s) as i32;
-            let old_pen = unsafe { SelectObject(mem_dc, GetStockObject(NULL_PEN)) };
+        // ---- waveform ------------------------------------------------------
+        let bar_w = px(2.0).max(2);
+        let bar_gap = px(3.0).max(2);
+        let wave_left = pad + dot_r * 2 + px(13.0);
+        let wave_w = bar_w * BARS as i32 + bar_gap * (BARS as i32 - 1);
+        if live {
+            let max_h = px(19.0);
+            // A floor tall enough to see. RoundRect on a rectangle only a
+            // couple of pixels across degenerates to nothing at all, so short
+            // bars are filled rectangles and only tall ones get rounded ends.
+            let min_h = px(4.0).max(3);
             for i in 0..BARS {
                 let value = self.bars[i].clamp(0.0, 1.0);
-                let bar_h = ((max_bar_h as f32) * value).round().max(bar_w as f32) as i32;
-                let x = meter_left + i as i32 * (bar_w + bar_gap);
+                let bar_h = ((max_h as f32) * value).round().max(min_h as f32) as i32;
+                let x = wave_left + i as i32 * (bar_w + bar_gap);
                 let top = h / 2 - bar_h / 2;
-                // Quieter bars sit dimmer, so the meter has depth instead of
-                // being a row of identical blocks.
-                let brush = unsafe { CreateSolidBrush(dim(accent, 0.45 + 0.55 * value)) };
-                let old_brush = unsafe { SelectObject(mem_dc, brush.into()) };
+                // Taller bars brighter, so the trace has depth instead of
+                // being a row of identical marks.
+                let colour = dim(COL_WAVE, 0.55 + 0.45 * value);
                 unsafe {
-                    let _ = RoundRect(mem_dc, x, top, x + bar_w, top + bar_h, bar_w, bar_w);
-                    SelectObject(mem_dc, old_brush);
+                    let brush = CreateSolidBrush(colour);
+                    if bar_h > bar_w * 3 {
+                        let old_brush = SelectObject(dc, brush.into());
+                        let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+                        let _ = RoundRect(dc, x, top, x + bar_w, top + bar_h, bar_w, bar_w);
+                        SelectObject(dc, old_pen);
+                        SelectObject(dc, old_brush);
+                    } else {
+                        let r = RECT { left: x, top, right: x + bar_w, bottom: top + bar_h };
+                        FillRect(dc, &r, brush);
+                    }
                     let _ = DeleteObject(brush.into());
                 }
             }
-            unsafe {
-                SelectObject(mem_dc, old_pen);
-            }
         }
 
-        // Text. A live hypothesis is dimmer than a finished result: it is going
-        // to change and should not read as the text that landed.
-        let colour = match self.state {
-            OverlayState::Listening if !self.text.trim().is_empty() => COLORREF(0x00_C4_C4_C4),
-            OverlayState::Error => COLORREF(0x00_BB_BB_FF),
-            OverlayState::Done => COLORREF(0x00_F0_F0_F0),
-            _ => COLORREF(0x00_E4_E4_E4),
+        // ---- key hint on the right -----------------------------------------
+        // Drawn before the text, so the text knows where it has to stop.
+        let mut right_edge = w - pad;
+        if self.state == OverlayState::Listening {
+            unsafe {
+                SelectObject(dc, g.hint_font.into());
+            }
+            let cap_text: Vec<u16> = self.hint_key.encode_utf16().collect();
+            let cap_text_w = measure(dc, &cap_text);
+            let cap_pad = px(7.0);
+            let cap_w = cap_text_w + cap_pad * 2;
+            let cap_h = px(20.0);
+            let cap_left = right_edge - cap_w;
+            let cap_top = h / 2 - cap_h / 2;
+
+            unsafe {
+                let brush = CreateSolidBrush(COL_KEYCAP);
+                let old_brush = SelectObject(dc, brush.into());
+                let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+                let _ = RoundRect(
+                    dc,
+                    cap_left,
+                    cap_top,
+                    cap_left + cap_w,
+                    cap_top + cap_h,
+                    px(6.0),
+                    px(6.0),
+                );
+                SelectObject(dc, old_pen);
+                SelectObject(dc, old_brush);
+                let _ = DeleteObject(brush.into());
+
+                SetTextColor(dc, COL_KEYCAP_TEXT);
+                let mut buf = cap_text.clone();
+                let mut r = RECT {
+                    left: cap_left + cap_pad,
+                    top: 0,
+                    right: cap_left + cap_w,
+                    bottom: h,
+                };
+                DrawTextW(dc, &mut buf, &mut r, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            }
+
+            let hold: Vec<u16> = "Hold".encode_utf16().collect();
+            let hold_w = measure(dc, &hold);
+            let hold_left = cap_left - px(8.0) - hold_w;
+            unsafe {
+                SetTextColor(dc, COL_HINT);
+                let mut buf = hold;
+                let mut r = RECT { left: hold_left, top: 0, right: cap_left, bottom: h };
+                DrawTextW(dc, &mut buf, &mut r, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            }
+            right_edge = hold_left - px(14.0);
+        }
+
+        // ---- the words -----------------------------------------------------
+        let text_left = if live { wave_left + wave_w + px(15.0) } else { wave_left };
+        let caret_space = if self.state == OverlayState::Listening { px(10.0) } else { 0 };
+        let text_max = (right_edge - text_left - caret_space).max(0);
+
+        let body = match (self.text.trim(), self.state) {
+            ("", OverlayState::Listening) => "Listening".to_string(),
+            ("", OverlayState::Finalising) => "Transcribing".to_string(),
+            ("", OverlayState::Error) => "Nothing heard".to_string(),
+            ("", _) => String::new(),
+            (t, _) => t.to_string(),
         };
+
         unsafe {
-            SelectObject(mem_dc, g.text_font.into());
-            SetTextColor(mem_dc, colour);
+            SelectObject(dc, g.text_font.into());
+            SetTextColor(
+                dc,
+                match self.state {
+                    OverlayState::Listening if !self.text.trim().is_empty() => COL_TEXT_LIVE,
+                    OverlayState::Error => COL_HINT,
+                    _ => COL_TEXT,
+                },
+            );
         }
 
         // Follow the tail. While someone keeps talking, the words that matter
         // are the ones just said, not the ones at the start of the sentence.
-        let (shown, clipped) = tail_that_fits(mem_dc, &body, text_max);
-        let mut wide: Vec<u16> = shown.encode_utf16().collect();
-        let mut text_rect = RECT { left: text_left, top: 0, right: w - pad, bottom: h };
-        if !wide.is_empty() {
+        let (shown, clipped) = tail_that_fits(dc, &body, text_max);
+        let shown_w = measure_str(dc, &shown);
+        if !shown.is_empty() {
+            let mut buf: Vec<u16> = shown.encode_utf16().collect();
+            let mut r = RECT { left: text_left, top: 0, right: right_edge, bottom: h };
             unsafe {
-                DrawTextW(
-                    mem_dc,
-                    &mut wide,
-                    &mut text_rect,
-                    DT_SINGLELINE | DT_VCENTER | DT_LEFT,
-                );
+                DrawTextW(dc, &mut buf, &mut r, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
             }
         }
 
+        // Caret, right after the words: the same signal a text field gives.
+        if self.state == OverlayState::Listening {
+            let caret_x = (text_left + shown_w + px(5.0)).min(right_edge - px(2.0));
+            let caret_h = px(18.0);
+            let caret = RECT {
+                left: caret_x,
+                top: h / 2 - caret_h / 2,
+                right: caret_x + px(2.0).max(1),
+                bottom: h / 2 + caret_h / 2,
+            };
+            unsafe {
+                let brush = CreateSolidBrush(COL_ACCENT);
+                FillRect(dc, &caret, brush);
+                let _ = DeleteObject(brush.into());
+            }
+        }
+
+        // ---- compose --------------------------------------------------------
         let pixels = unsafe { std::slice::from_raw_parts_mut(g.bits, (w * h * 4) as usize) };
 
         // When the sentence is longer than the pill, the left edge of the text
         // fades into the background rather than being chopped or prefixed with
         // an ellipsis. It reads as words scrolling past a window.
         if clipped {
-            let fade = (34.0 * s) as i32;
-            fade_into_background(pixels, w, h, text_left, text_left + fade, BG);
+            fade_into_background(pixels, w, h, text_left, text_left + px(34.0), BG_BYTES);
         }
-
-        apply_rounded_alpha(pixels, w, h, h / 2, 242);
+        premultiply_with_mask(pixels, &g.mask);
 
         // Bottom centre of the work area, so it never sits under the taskbar.
         let mut work = RECT::default();
@@ -439,7 +533,7 @@ impl Overlay {
         }
         let mut pos = POINT {
             x: work.left + (work.right - work.left - w) / 2,
-            y: work.bottom - h - (76.0 * s) as i32,
+            y: work.bottom - h - px(78.0),
         };
         let mut size = SIZE { cx: w, cy: h };
         let mut src = POINT { x: 0, y: 0 };
@@ -457,7 +551,7 @@ impl Overlay {
                 Some(screen_dc),
                 Some(&mut pos),
                 Some(&mut size),
-                Some(mem_dc),
+                Some(dc),
                 Some(&mut src),
                 COLORREF(0),
                 Some(&blend),
@@ -467,11 +561,6 @@ impl Overlay {
         }
     }
 }
-
-/// The pill background, in BGR order to match the DIB layout.
-const BG: [u8; 3] = [0x1B, 0x19, 0x17];
-/// Lightning bolt in Segoe Fluent Icons and Segoe MDL2 Assets alike.
-const BOLT_GLYPH: u16 = 0xE945;
 
 impl Gdi {
     fn create(width: i32, height: i32, scale: f32) -> Option<Gdi> {
@@ -496,26 +585,9 @@ impl Gdi {
                 CreateDIBSection(Some(mem_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
             SelectObject(mem_dc, bitmap.into());
 
-            let text_font = make_font(17.0 * scale, FW_SEMIBOLD.0 as i32, w!("Segoe UI"));
-            // Windows 11 ships Segoe Fluent Icons, Windows 10 has Segoe MDL2
-            // Assets, and E945 is the bolt in both. If neither is installed the
-            // glyph measures as nothing and it is left out rather than drawn as
-            // a missing-character box.
-            let mut icon_font =
-                make_font(19.0 * scale, FW_NORMAL.0 as i32, w!("Segoe Fluent Icons"));
-            SelectObject(mem_dc, icon_font.into());
-            let mut bolt_w = measure(mem_dc, &[BOLT_GLYPH]);
-            if bolt_w == 0 {
-                let _ = DeleteObject(icon_font.into());
-                icon_font = make_font(19.0 * scale, FW_NORMAL.0 as i32, w!("Segoe MDL2 Assets"));
-                SelectObject(mem_dc, icon_font.into());
-                bolt_w = measure(mem_dc, &[BOLT_GLYPH]);
-            }
-            let icon_ok = bolt_w > 0;
-
-            let bg_brush = CreateSolidBrush(COLORREF(
-                (BG[0] as u32) << 16 | (BG[1] as u32) << 8 | BG[2] as u32,
-            ));
+            let text_font = make_font(16.5 * scale, FW_MEDIUM.0 as i32, w!("Segoe UI"));
+            let hint_font = make_font(13.5 * scale, FW_SEMIBOLD.0 as i32, w!("Segoe UI"));
+            let bg_brush = CreateSolidBrush(COL_BG);
 
             ReleaseDC(None, screen_dc);
             Some(Gdi {
@@ -523,10 +595,9 @@ impl Gdi {
                 bitmap,
                 bits: bits as *mut u8,
                 text_font,
-                icon_font,
-                icon_ok,
+                hint_font,
                 bg_brush,
-                bolt_w,
+                mask: rounded_mask(width, height, height / 2, 244),
             })
         }
     }
@@ -536,7 +607,7 @@ impl Drop for Gdi {
     fn drop(&mut self) {
         unsafe {
             let _ = DeleteObject(self.text_font.into());
-            let _ = DeleteObject(self.icon_font.into());
+            let _ = DeleteObject(self.hint_font.into());
             let _ = DeleteObject(self.bg_brush.into());
             let _ = DeleteObject(self.bitmap.into());
             let _ = DeleteDC(self.mem_dc);
@@ -591,8 +662,8 @@ fn tail_that_fits(dc: HDC, text: &str, max_px: i32) -> (String, bool) {
     if measure_str(dc, text) <= max_px {
         return (text.to_string(), false);
     }
-    // Walk word starts from the end until the tail no longer fits, which is a
-    // handful of measurements on a sentence rather than one per character.
+    // Walk word starts back from the end: a handful of measurements on a
+    // sentence rather than one per character.
     let mut best: Option<usize> = None;
     let bytes = text.as_bytes();
     let mut i = text.len();
@@ -629,8 +700,8 @@ fn dim(colour: COLORREF, factor: f32) -> COLORREF {
     COLORREF((b as u32) << 16 | (g as u32) << 8 | r as u32)
 }
 
-/// Blends pixels toward the pill background across a horizontal band, left
-/// edge fully faded, right edge untouched.
+/// Blends pixels toward the pill background across a horizontal band: fully
+/// background at the left edge, untouched at the right.
 fn fade_into_background(pixels: &mut [u8], w: i32, h: i32, x0: i32, x1: i32, bg: [u8; 3]) {
     let x0 = x0.max(0);
     let x1 = x1.min(w);
@@ -650,21 +721,18 @@ fn fade_into_background(pixels: &mut [u8], w: i32, h: i32, x0: i32, x1: i32, bg:
     }
 }
 
-/// Turns an opaque rectangle into a rounded, antialiased, premultiplied pill.
-///
-/// Coverage is computed per pixel from the distance to the rounded rectangle,
-/// so corners fade over a pixel instead of stepping. `opacity` is the overall
-/// alpha, 0..255.
-fn apply_rounded_alpha(pixels: &mut [u8], w: i32, h: i32, radius: i32, opacity: u8) {
+/// Coverage of a rounded rectangle, one byte per pixel, scaled by `opacity`.
+/// Corners fade over a pixel rather than stepping, which is what antialiases
+/// them. Computed once, because the shape never changes.
+fn rounded_mask(w: i32, h: i32, radius: i32, opacity: u8) -> Vec<u8> {
     let r = radius.clamp(0, w.min(h) / 2) as f32;
-    let wf = w as f32;
-    let hf = h as f32;
+    let (wf, hf) = (w as f32, h as f32);
+    let mut mask = vec![0u8; (w * h) as usize];
     for y in 0..h {
         let py = y as f32 + 0.5;
         for x in 0..w {
-            let px = x as f32 + 0.5;
-            // Distance outside the rounded rectangle's corner circles.
-            let dx = (r - px).max(px - (wf - r)).max(0.0);
+            let pxf = x as f32 + 0.5;
+            let dx = (r - pxf).max(pxf - (wf - r)).max(0.0);
             let dy = (r - py).max(py - (hf - r)).max(0.0);
             let coverage = if dx > 0.0 && dy > 0.0 {
                 let d = (dx * dx + dy * dy).sqrt();
@@ -672,19 +740,26 @@ fn apply_rounded_alpha(pixels: &mut [u8], w: i32, h: i32, radius: i32, opacity: 
             } else {
                 1.0
             };
-
-            let a = (coverage * opacity as f32) as u32;
-            let i = ((y * w + x) * 4) as usize;
-            if a == 0 {
-                pixels[i..i + 4].fill(0);
-                continue;
-            }
-            // UpdateLayeredWindow with AC_SRC_ALPHA wants premultiplied colour.
-            for c in 0..3 {
-                pixels[i + c] = ((pixels[i + c] as u32 * a) / 255) as u8;
-            }
-            pixels[i + 3] = a as u8;
+            mask[(y * w + x) as usize] = (coverage * opacity as f32) as u8;
         }
+    }
+    mask
+}
+
+/// Applies the mask as the alpha channel and premultiplies the colour, which is
+/// what `UpdateLayeredWindow` with `AC_SRC_ALPHA` expects.
+fn premultiply_with_mask(pixels: &mut [u8], mask: &[u8]) {
+    for (i, &a) in mask.iter().enumerate() {
+        let p = i * 4;
+        if a == 0 {
+            pixels[p..p + 4].fill(0);
+            continue;
+        }
+        let a32 = a as u32;
+        pixels[p] = ((pixels[p] as u32 * a32) / 255) as u8;
+        pixels[p + 1] = ((pixels[p + 1] as u32 * a32) / 255) as u8;
+        pixels[p + 2] = ((pixels[p + 2] as u32 * a32) / 255) as u8;
+        pixels[p + 3] = a;
     }
 }
 
@@ -707,43 +782,47 @@ unsafe extern "system" fn wnd_proc(
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-// Kept so the HGDIOBJ alias used through SelectObject stays imported.
-const _: Option<HGDIOBJ> = None;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn corners_are_cut_and_the_middle_is_solid() {
+    fn mask_cuts_corners_and_keeps_the_middle() {
         let (w, h) = (60, 20);
-        let mut px = vec![200u8; (w * h * 4) as usize];
-        apply_rounded_alpha(&mut px, w, h, 10, 255);
-        let alpha = |x: i32, y: i32| px[((y * w + x) * 4 + 3) as usize];
-        assert_eq!(alpha(0, 0), 0, "top-left corner cut away");
-        assert_eq!(alpha(w - 1, h - 1), 0, "bottom-right too");
-        assert_eq!(alpha(w / 2, h / 2), 255, "middle solid");
-        assert_eq!(alpha(w / 2, 0), 255, "top edge is not a corner");
+        let mask = rounded_mask(w, h, h / 2, 255);
+        let at = |x: i32, y: i32| mask[(y * w + x) as usize];
+        assert_eq!(at(0, 0), 0, "top-left corner cut away");
+        assert_eq!(at(w - 1, h - 1), 0, "bottom-right too");
+        assert_eq!(at(w / 2, h / 2), 255, "middle solid");
+        assert_eq!(at(w / 2, 0), 255, "top edge is not a corner");
     }
 
     #[test]
     fn colour_is_premultiplied() {
         let (w, h) = (10, 10);
         let mut px = vec![200u8; (w * h * 4) as usize];
-        apply_rounded_alpha(&mut px, w, h, 0, 128);
-        let i = ((5 * w + 5) * 4) as usize;
-        assert_eq!(px[i + 3], 128);
-        assert_eq!(px[i], (200 * 128 / 255) as u8);
+        let mask = vec![128u8; (w * h) as usize];
+        premultiply_with_mask(&mut px, &mask);
+        assert_eq!(px[3], 128);
+        assert_eq!(px[0], (200 * 128 / 255) as u8);
     }
 
     #[test]
-    fn fade_reaches_the_background_on_the_left_and_leaves_the_right() {
+    fn transparent_pixels_are_cleared_entirely() {
+        let mut px = vec![200u8; 4 * 4];
+        let mask = vec![0u8, 255, 0, 255];
+        premultiply_with_mask(&mut px, &mask);
+        assert_eq!(&px[0..4], &[0, 0, 0, 0]);
+        assert_eq!(px[7], 255);
+    }
+
+    #[test]
+    fn fade_reaches_the_background_and_leaves_the_rest() {
         let (w, h) = (20, 4);
         let mut px = vec![200u8; (w * h * 4) as usize];
         let bg = [10u8, 20, 30];
         fade_into_background(&mut px, w, h, 0, 10, bg);
         assert_eq!(px[0], bg[0], "left edge is fully background");
-        assert_eq!(px[(9 * 4) as usize + 0], 181, "and blends back to the text");
         assert_eq!(px[(15 * 4) as usize], 200, "beyond the band, untouched");
     }
 
@@ -769,23 +848,22 @@ mod tests {
         for b in o.bars {
             assert!(b > 0.0 && b <= 1.0, "bar out of range: {b}");
         }
-        // Silence still breathes: the pill should not look broken in a quiet
-        // room, but it must not look like speech either.
         assert!(o.bars.iter().all(|b| *b < 0.35), "silence should stay low");
     }
 
     #[test]
     fn bars_respond_to_level() {
-        let mut o = Overlay::disabled();
+        let mut loud = Overlay::disabled();
         for _ in 0..40 {
-            o.set_level(1.0);
-            o.advance();
+            loud.set_level(1.0);
+            loud.advance();
         }
-        let loud = o.bars[BARS / 2];
-        let mut q = Overlay::disabled();
+        let mut quiet = Overlay::disabled();
         for _ in 0..40 {
-            q.advance();
+            quiet.advance();
         }
-        assert!(loud > q.bars[BARS / 2] * 2.0, "loud must read taller");
+        let loudest = loud.bars.iter().cloned().fold(0.0f32, f32::max);
+        let quietest = quiet.bars.iter().cloned().fold(0.0f32, f32::max);
+        assert!(loudest > quietest * 2.0, "loud must read taller");
     }
 }

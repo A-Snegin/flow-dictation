@@ -179,7 +179,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let overlay = Overlay::create().unwrap_or_else(|e| {
+    let overlay = Overlay::create(&hotkey_label(&settings.hotkey.key)).unwrap_or_else(|e| {
         eprintln!("overlay unavailable, continuing without it: {e}");
         Overlay::disabled()
     });
@@ -452,6 +452,20 @@ impl App {
             }
         }
     }
+}
+
+/// What to print on the pill's key cap. The user is holding a physical key;
+/// the label should look like the key, not like a config value.
+fn hotkey_label(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "rightctrl" | "rctrl" | "right_control" | "leftctrl" | "lctrl" => "Ctrl",
+        "rightalt" | "ralt" => "Alt",
+        "rightshift" | "rshift" => "Shift",
+        "capslock" => "Caps",
+        "f13" => "F13",
+        other => other,
+    }
+    .to_string()
 }
 
 /// Proves the capture path without needing anyone to speak: packet count,
