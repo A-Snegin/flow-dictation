@@ -42,6 +42,15 @@ pub struct Model {
     /// Extra collection window after key-up so the last device packet is not
     /// clipped. Paid once per dictation and worth it below about 20 ms.
     pub release_tail_ms: u64,
+    /// Run inference on one thread instead of letting ONNX Runtime spread it
+    /// across every core. Measured on this machine: real-time factor is
+    /// unchanged (0.28 against 0.31 for tiny, 0.62 against 0.63 for small)
+    /// because the graphs are too small for threading to pay, while the tail
+    /// improves markedly because there is no thread-pool synchronisation to be
+    /// descheduled in the middle of. It also means one busy core rather than
+    /// eight, which is the difference between Flow being unnoticeable and Flow
+    /// being felt by whatever else is running.
+    pub single_thread: bool,
     /// Bias strength for dictionary terms. Upstream measured 2.0 as the point
     /// where terms come out most accurately; higher invents them.
     pub keyterm_boost: f32,
@@ -87,6 +96,7 @@ impl Default for Model {
             partial_cadence_ms: 250,
             force_partials: false,
             release_tail_ms: 15,
+            single_thread: true,
             keyterm_boost: 2.0,
         }
     }
@@ -168,7 +178,8 @@ impl Settings {
              # Hotkey and model changes need Flow restarted.\n\
              #\n\
              # hotkey.key            rightctrl | rightalt | rightshift | f13 | capslock | leftctrl\n\
-             # model.profile         fast (tiny, roughly twice as quick) | balanced (small)\n\
+             # model.profile         fast (tiny, about twice as quick) | balanced (small)\n\
+             # model.single_thread   true is both faster at the tail and far lighter on CPU\n\
              # insertion.mode        paste (default, flat cost) | type (for apps that block paste)\n\
              # insertion.terminal_mode  how to insert into PowerShell, cmd, Windows Terminal and\n\
              #                       friends. Typing is the default there, and line breaks are\n\

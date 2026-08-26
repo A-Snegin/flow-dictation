@@ -139,6 +139,12 @@ impl AsrService {
             std::thread::Builder::new()
                 .name("flow-asr".into())
                 .spawn(move || {
+                    // A notch above normal, not real time. The work is bursty
+                    // and latency-critical, and on a machine with a busy
+                    // background it was being descheduled mid-decode. Real time
+                    // would be wrong: starving audio capture or the UI to feed
+                    // the recogniser makes the felt latency worse, not better.
+                    raise_priority();
                     worker_loop(
                         transcriber,
                         config,
@@ -241,6 +247,17 @@ impl Drop for AsrService {
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }
+    }
+}
+
+/// Nudges the calling thread above normal priority. Best effort: if the call
+/// fails the worker simply runs at the default priority.
+fn raise_priority() {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+    };
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     }
 }
 

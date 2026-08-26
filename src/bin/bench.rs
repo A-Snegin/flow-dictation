@@ -271,7 +271,7 @@ fn main() {
                     r.flush.as_secs_f64() * 1000.0,
                     r.partial_calls.len(),
                     r.model_time.as_secs_f64() / r.audio_secs,
-                    truncate(&r.text, 64)
+                    truncate(&r.text, text_width())
                 );
             }
             Err(e) => eprintln!("  hold {}: ERROR {e}", i + 1),
@@ -332,6 +332,16 @@ fn main() {
         }
     }
     println!("\n{}", frag_flush.report("short-hold flush"));
+}
+
+/// How much of each transcript to print. Full text when comparing two
+/// configurations for identical output, a readable summary otherwise.
+fn text_width() -> usize {
+    if std::env::var("FLOW_FULL_TEXT").is_ok() {
+        usize::MAX
+    } else {
+        64
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {

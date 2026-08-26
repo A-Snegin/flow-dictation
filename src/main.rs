@@ -83,6 +83,12 @@ fn main() {
         eprintln!("settings: {p}");
     }
 
+    // Must be set before the first ONNX session exists, which means before the
+    // transcriber loads. The library reads it when it builds session options.
+    if settings.model.single_thread {
+        std::env::set_var("MOONSHINE_ORT_SINGLE_THREAD", "1");
+    }
+
     let (model_dir, arch) = settings.resolve_model();
     if !model_dir.join("streaming_config.json").exists() {
         eprintln!(
@@ -196,6 +202,11 @@ fn main() {
     println!(
         "Insertion: {} normally, {} in terminals.",
         insertion.mode, insertion.terminal_mode
+    );
+    println!(
+        "Model: {} profile, {}.",
+        settings.model.profile,
+        if settings.model.single_thread { "single threaded" } else { "multi threaded" }
     );
     println!("Settings: {}", Settings::path().display());
 
@@ -559,6 +570,12 @@ fn mic_test(secs: u64) {
 /// terminal.
 fn dictate_once(secs: u64) {
     let (settings, _) = Settings::load();
+    // Must be set before the first ONNX session exists, which means before the
+    // transcriber loads. The library reads it when it builds session options.
+    if settings.model.single_thread {
+        std::env::set_var("MOONSHINE_ORT_SINGLE_THREAD", "1");
+    }
+
     let (model_dir, arch) = settings.resolve_model();
     println!("loading {} ...", model_dir.display());
     let transcriber = match Transcriber::load(&model_dir.to_string_lossy(), arch, &[]) {
