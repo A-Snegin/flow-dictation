@@ -1,0 +1,26 @@
+[package]
+name = "flow"
+version = "0.1.0"
+edition = "2021"
+description = "Speed-first local dictation for Windows"
+publish = false
+
+[lib]
+name = "flow"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flow-core"
+path = "src/main.rs"
+
+[[bin]]
+name = "smoke"
+path = "src/bin/smoke.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

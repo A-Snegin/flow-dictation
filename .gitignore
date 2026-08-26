@@ -1,0 +1,6 @@
+/target
+/vendor
+/models
+*.jsonl
+*.tar.gz
+/bench/corpus/*.wav
