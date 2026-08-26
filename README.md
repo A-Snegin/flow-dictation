@@ -3,7 +3,7 @@
 An unapologetic alternative to cloud dictation. Ultra light, heavily optimised,
 and your voice never leaves the machine.
 
-Hold a key, talk, let go. The text is in whatever you were typing into.
+Hold a key, talk, let go. The text appears wherever your cursor is.
 
 <p align="center">
   <img src="docs/images/overlay.png" alt="The Flow overlay: a recording dot, a live waveform, and the words as they are recognised" width="616">
@@ -18,21 +18,22 @@ Hold a key, talk, let go. The text is in whatever you were typing into.
 </p>
 
 Every cloud dictation tool sends your voice to somebody else's computer. Flow
-does the recognition here, on the CPU you already own. There is no account, no
-upload, no subscription, and no network traffic of any kind while you dictate.
-Pull the ethernet cable out and it behaves the same.
+does the recognition on your own CPU. There is no account, no upload and no
+subscription, and it works with no network connection at all.
 
-Fast and light are measurable, so they are measured. On a 15 watt laptop chip:
+On a 15 watt laptop chip:
 
 - **221 ms** from releasing the key to text on screen, on the fast model
-- **0.0%** idle CPU, and one inference thread while working
+- **0.0%** idle CPU, and one core in use while working
 - **19 MB** installer, **220 MB** resident with the speech model held in memory
 - **2 to 4 ms** from the hotkey to a running microphone
 - No browser engine, no UI toolkit, no background service, no telemetry
 
-Local recognition has a reputation for being slow. That reputation comes from
-running an offline model the way an online one is written, and most of the
-engineering here went into the difference.
+Local recognition has a reputation for being slow, and most of that comes from
+three habits: waiting for the sentence to end before starting work, loading the
+model when the key is pressed, and handing the recogniser the whole recording in
+one call. Flow loads the model at startup and feeds it while you are still
+talking.
 
 ## Installing
 
@@ -67,9 +68,8 @@ they arrive as punctuation. Sentences are capitalised for you.
 
 ## Speed
 
-Every number below is reproducible with a command in this repository. Measured
-on a Ryzen 7 7735U, a 15 watt laptop chip from 2022, while OneDrive was using
-most of a core in the background, so the quiet-machine figures are better.
+Measured on a Ryzen 7 7735U, a 15 watt laptop chip from 2022, while OneDrive
+was using most of a core in the background. On a quiet machine it is faster.
 
 | | Small model | Tiny model |
 |---|---:|---:|
@@ -80,8 +80,7 @@ most of a core in the background, so the quiet-machine figures are better.
 | Word error rate, clean speech | 5.0% | 3.4% |
 
 Hotkey to a running microphone is 2 to 4 milliseconds. Idle CPU is 0.0%. The
-process holds about 220 MB, nearly all of it the speech model, which stays in
-memory so that pressing the key loads nothing.
+process holds about 220 MB, nearly all of it the speech model.
 
 Wispr Flow publishes a target of under 700 ms at the 99th percentile for its
 cloud pipeline, of which up to 200 ms is budgeted for the network round trip.
@@ -117,71 +116,57 @@ Nothing on that path allocates a model, touches the disk, opens a socket or
 waits on a thread. Capture teardown, clipboard restore and trace writing all
 happen after the text is already on screen.
 
-Five threads, four of them asleep almost all the time:
+Flow runs five threads:
 
-```mermaid
-flowchart LR
-    subgraph aud["Capture thread"]
-        A1["Multimedia priority<br/>copy and convert only<br/>no allocation"]
-    end
-    subgraph asr["ASR worker"]
-        S1["One transcriber<br/>one ONNX thread<br/>above-normal priority"]
-    end
-    subgraph msg["Message thread"]
-        M1["Keyboard hook<br/>overlay at 25 fps<br/>tray and settings"]
-    end
-
-    aud -->|"16 kHz mono"| asr
-    asr -->|"partial and final"| msg
-
-    classDef box fill:#1c1d1e,stroke:#f0603c,color:#f2f2f2
-    class A1,S1,M1 box
-```
+| Thread | Priority | Work |
+|---|---|---|
+| Message | normal | Keyboard hook, overlay at 25 fps while visible, tray, settings. Blocks until something happens. |
+| Capture | multimedia | Copy the packet, downmix, resample. No allocation, no locks held over work. |
+| ASR worker | above normal | One transcriber, one ONNX thread. Idle between utterances. |
+| Clipboard restore | normal | Runs after the text is on screen. |
+| Trace writer | normal | One JSON line per dictation, after the fact. |
 
 ## Design decisions
-
-Four decisions carry most of the speed. Each contradicted the obvious choice.
 
 **The microphone opens at startup.** Opening the audio device costs 321 ms, so
 doing it on key-down clipped the first word off every sentence. The device is
 initialised once and only started when the key goes down, which measures 0.0 ms
-with the first sample 4 ms later. An initialised, stopped client is not capturing, so
-there is still no microphone indicator sitting in the system tray all day.
+with the first sample 4 ms later. A device that is open but not started is not
+recording, so Windows shows no microphone indicator between dictations.
 
 **The overlay paints after the microphone starts.** It used to paint first, and
-an `UpdateLayeredWindow` on a topmost window is not free: traces showed 231 ms
-between the key press and the first audio sample. Reordering two statements
-recovered a quarter of a second of speech per dictation.
+drawing it took 231 ms before the microphone even started. That was speech the
+recogniser never heard. Moving two lines of code fixed it.
 
 **Inference runs on one thread.** ONNX Runtime spreads work across every core by
-default. For graphs this small that buys nothing and costs tail latency in
-thread-pool synchronisation. Real-time factor is unchanged at 0.28 against 0.31,
+default. The models here are small enough that splitting the work costs more in
+coordination than it saves. Real-time factor is unchanged at 0.28 against 0.31,
 the 95th percentile improves, and Flow uses one core in place of eight. Word
 error rate came out identical, checked against a reference transcript.
 
-**The worker declines to start a partial once the key is released.** The
-recogniser cannot cancel a call in flight. Refusing to begin one is the only
-bound available on how long key-up waits.
+**The worker starts no new partial once the key is released.** A call to the
+recogniser cannot be stopped once it has started. When you let go, you wait for
+whatever call is running. Not starting another one is the only way to keep
+that wait short.
 
 There is no GPU path. Moonshine converts its models to
 ORT format at full graph optimisation, which fuses whole regions into
 `com.microsoft` CPU operators. No compiling execution provider recognises those,
-and because they sit mid-graph the model shatters into dozens of fragments.
+and because they sit in the middle of the graph the model splits into dozens
+of pieces.
 Upstream measured fewer than seven nodes per partition on every model they
-tested. For this workload the CPU is the fast path.
+tested. On this workload the CPU is faster.
 
 ## Privacy
 
-Your voice stays on the machine. No audio is written to disk at any point; it
-exists in memory for as long as it takes to recognise.
+Your voice stays on the machine. No audio is ever written to disk. It is held
+in memory for as long as it takes to recognise.
 
 | | |
 |---|---|
 | `%APPDATA%\Flow\settings.toml` | settings and dictionary |
 | `%LOCALAPPDATA%\Flow\traces.jsonl` | timings and a character count, never the text |
 | `%LOCALAPPDATA%\Flow\models` | the speech model |
-
-Two details worth stating plainly.
 
 Pasting puts the text on the Windows clipboard for a moment. Clipboard History
 (Win+V) would keep a copy and sync it to a Microsoft account if that is enabled,
@@ -191,26 +176,21 @@ so every paste is marked `CanIncludeInClipboardHistory = 0`,
 are restored afterwards. Setting insertion to Type avoids the clipboard
 entirely.
 
-Flow never prints what was dictated. It reports a length. Anything that
-redirects the process would otherwise write your dictation into a file.
-`FLOW_ECHO=1` brings the text back when you are debugging.
+Flow prints how many characters it inserted, never the words. Anything that
+captures the program's output would otherwise save what you said to a file.
+`FLOW_ECHO=1` turns the text back on when you are debugging.
 
 ## Settings
-
-<p align="center">
-  <img src="docs/images/settings.png" alt="The Flow settings window" width="514">
-</p>
 
 Right-click the tray icon, Open settings. Everything applies on save, including
 the hotkey and the model, so nothing needs a restart. Editing
 `%APPDATA%\Flow\settings.toml` in a text editor works equally well; the file is
 watched.
 
-The dictionary does two jobs from one list. Terms are given to the recogniser
-while it listens, so it is more likely to produce them, and the same list
-corrects the output afterwards if it did not. Names, companies, products and
-acronyms are what a recogniser gets wrong, and they are the errors a reader
-notices.
+Names, companies, products and acronyms are what a recogniser gets wrong most
+often. The dictionary does two jobs from one list: Flow gives your terms to the
+recogniser while it listens, so it is more likely to get them right, and the
+same list fixes the text afterwards when it did not.
 
 ```
 Lift-Off Consulting        a term to recognise, written as typed
@@ -228,18 +208,15 @@ flow-core --dictionary "we met the lift off consulting team about dddm"
 Dictating into PowerShell, cmd or Windows Terminal is handled separately from
 dictating into a document.
 
-Paste keybindings vary between consoles and are sometimes disabled, so terminals
-receive synthesised Unicode keystrokes, which work anywhere a console reads
-input.
+Paste keybindings vary between consoles and are sometimes disabled, so in a
+terminal Flow types the text out as keystrokes instead, which works anywhere.
 
-Line breaks become a space. At a shell prompt a line break is the Enter key, so
-dictating "new paragraph" while composing a command would run it. That cannot
-happen. Add your own shells under `insertion.terminal_apps` if you use one
-outside the built-in list.
+In a terminal, line breaks are turned into spaces. A line break at a shell
+prompt is the Enter key, so without that, saying "new paragraph" while typing a
+command would run it. Add your own shells under `insertion.terminal_apps` if you
+use one outside the built-in list.
 
 ## Diagnostics
-
-Every claim above has a command behind it.
 
 ```powershell
 flow-core --mic-test 3          # device open cost, arm cost, sample rate, level

@@ -1,5 +1,6 @@
 Flow
-Local dictation for Windows. Hold a key, talk, let go, the text is there.
+Local dictation for Windows. Hold a key, talk, let go, and the text appears
+wherever your cursor is.
 
 
 GETTING STARTED
@@ -11,7 +12,7 @@ Flow sits in the notification area, next to the clock. Right-click it for
 settings, or to pause it, or to quit.
 
 The first time you hold the key, Windows will ask whether Flow can use your
-microphone. Say yes; without it there is nothing to transcribe.
+microphone. Flow needs it to hear you.
 
 
 PRIVACY
