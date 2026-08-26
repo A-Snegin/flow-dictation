@@ -37,7 +37,8 @@
 //! focus the caret would leave the user's document and the text would land in
 //! the wrong place.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
@@ -117,6 +118,11 @@ pub struct Overlay {
     visible: bool,
     /// Which key the user is holding, drawn on the right as a reminder.
     hint_key: String,
+    /// Peak level since the last frame, in thousandths, written by the capture
+    /// thread. Read and cleared once per animation step: sampling it from the
+    /// message loop instead meant reading it several times between frames, and
+    /// every read after the first saw zero and pulled the meter down.
+    level_source: Option<Arc<AtomicU32>>,
     scale: f32,
     /// Fixed. The pill never resizes: a shape that grows and shrinks as words
     /// arrive is movement at the edge of vision, which is the opposite of what
@@ -156,6 +162,7 @@ impl Overlay {
             shown_at: Instant::now(),
             visible: false,
             hint_key: "Ctrl".into(),
+            level_source: None,
             scale: 1.0,
             width: 0,
             height: 0,
@@ -215,6 +222,7 @@ impl Overlay {
                 shown_at: Instant::now(),
                 visible: false,
                 hint_key: hint_key.to_string(),
+                level_source: None,
                 scale,
                 width,
                 height,
@@ -227,14 +235,36 @@ impl Overlay {
         self.visible
     }
 
-    /// Live microphone level, 0..1. Fast attack so a syllable registers at
-    /// once, slow release so the trace does not look dead between words.
-    pub fn set_level(&mut self, level: f32) {
-        let target = level.clamp(0.0, 1.0);
+    /// Hands the overlay the counter the capture thread writes peaks into.
+    pub fn attach_level(&mut self, source: Arc<AtomicU32>) {
+        self.level_source = Some(source);
+    }
+
+    /// Takes the loudest sample since the last frame and clears the counter.
+    fn sample_level(&mut self) {
+        if let Some(src) = self.level_source.as_ref() {
+            let peak = src.swap(0, Ordering::Relaxed) as f32 / 1000.0;
+            self.set_level(peak);
+        }
+    }
+
+    /// Live microphone level from a raw sample peak, 0..1.
+    ///
+    /// The raw peak is a poor thing to draw directly. Ordinary speech into a
+    /// laptop microphone peaks around 0.05 to 0.3, so feeding it straight
+    /// through left every bar pinned to its minimum height and the trace
+    /// looked identical whether or not anyone was talking. A square root opens
+    /// out the quiet end, where speech actually lives, and the gain puts a
+    /// normal speaking voice near the top of the meter.
+    ///
+    /// Fast attack so a syllable registers at once, slow release so the trace
+    /// does not collapse between words.
+    pub fn set_level(&mut self, peak: f32) {
+        let target = (peak.clamp(0.0, 1.0).sqrt() * 1.7).min(1.0);
         self.level = if target > self.level {
-            self.level * 0.4 + target * 0.6
+            self.level * 0.35 + target * 0.65
         } else {
-            self.level * 0.82 + target * 0.18
+            self.level * 0.80 + target * 0.20
         };
     }
 
@@ -261,6 +291,7 @@ impl Overlay {
     pub fn tick(&mut self) -> Option<Duration> {
         match self.state {
             OverlayState::Listening => {
+                self.sample_level();
                 self.advance();
                 self.render();
                 Some(LISTENING_TICK)
@@ -303,7 +334,7 @@ impl Overlay {
         }
         // A floor so the trace breathes gently rather than flatlining: a quiet
         // room should not look like a broken application.
-        let energy = (self.level * 1.3).min(1.0).max(0.05);
+        let energy = self.level.clamp(0.06, 1.0);
         let centre = (BARS as f32 - 1.0) / 2.0;
         for i in 0..BARS {
             let from_centre = (i as f32 - centre).abs() / centre;

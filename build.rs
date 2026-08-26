@@ -1,5 +1,9 @@
 use std::path::PathBuf;
 
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+}
+
 fn main() {
     // The runtime bundle lives outside the source tree, and outside OneDrive:
     // it is 130 MB of static libraries that no source tree should carry and no
@@ -24,6 +28,23 @@ fn main() {
     }
     println!("cargo:rustc-link-lib=dylib=onnxruntime");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=assets/flow.ico");
+
+    // Compile the application icon into the executable. It becomes the icon
+    // Explorer and the taskbar show, and the tray loads the same resource so
+    // the notification area matches.
+    let icon = manifest_dir().join("assets/flow.ico");
+    if icon.exists() {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon_with_id(&icon.to_string_lossy(), "1");
+        res.set("FileDescription", "Flow: local dictation");
+        res.set("ProductName", "Flow");
+        if let Err(e) = res.compile() {
+            // Not fatal: without the resource the tray falls back to the
+            // system icon and the app is otherwise identical.
+            println!("cargo:warning=icon resource not compiled: {e}");
+        }
+    }
     println!("cargo:rerun-if-env-changed=FLOW_MOONSHINE_DIR");
 
     // onnxruntime.dll must sit next to the executable.

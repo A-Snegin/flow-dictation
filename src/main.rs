@@ -129,7 +129,10 @@ fn main() {
                     first.store(trace::now(), Ordering::Relaxed);
                 }
                 let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-                level.store((peak * 1000.0) as u32, Ordering::Relaxed);
+                // fetch_max, not store: packets arrive every 10 ms and the
+                // overlay looks every 40 ms, so a plain store threw away three
+                // packets in four and could miss the loudest one entirely.
+                level.fetch_max((peak * 1000.0) as u32, Ordering::Relaxed);
                 sink.push(samples);
             })
         })
@@ -185,11 +188,12 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let overlay = Overlay::create(&hotkey_label(&settings.hotkey.key)).unwrap_or_else(|e| {
+    let mut overlay = Overlay::create(&hotkey_label(&settings.hotkey.key)).unwrap_or_else(|e| {
         eprintln!("overlay unavailable, continuing without it: {e}");
         Overlay::disabled()
     });
-    let tray = Tray::create().unwrap_or_else(|e| {
+    overlay.attach_level(Arc::clone(&level));
+    let mut tray = Tray::create().unwrap_or_else(|e| {
         eprintln!("tray unavailable, continuing without it: {e}");
         Tray::disabled()
     });
@@ -244,8 +248,6 @@ fn main() {
     loop {
         // While the pill is up, wake often enough to animate the meter.
         // Otherwise sleep until something actually happens.
-        app.overlay
-            .set_level(app.level.load(Ordering::Relaxed) as f32 / 1000.0);
         let wait = app
             .overlay
             .tick()
@@ -267,6 +269,7 @@ fn main() {
                 if !app.enabled {
                     app.cancel();
                 }
+                tray.set_paused(!app.enabled);
                 println!("Dictation {}", if app.enabled { "enabled" } else { "paused" });
             }
             Some(TrayCommand::LatencyReport) => println!("\n{}\n", trace::report()),
