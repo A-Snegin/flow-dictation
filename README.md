@@ -97,18 +97,18 @@ flow-core --mic-test 3                      # audio path
 ## How it works
 
 ```mermaid
-flowchart LR
-    K["Right Ctrl<br/>pressed"] --> A["WASAPI stream<br/>starts<br/>0.0 ms"]
-    A --> C["Capture thread<br/>copy, downmix,<br/>resample to 16 kHz"]
-    C --> S["ASR worker<br/>Moonshine streaming<br/>on ONNX Runtime"]
-    S -.->|"live text"| O["Overlay"]
-    K2["Right Ctrl<br/>released"] --> F["Refuse a new partial,<br/>collect 20 ms tail,<br/>drain the stream"]
+flowchart TB
+    K["<b>Right Ctrl pressed</b>"] --> A["WASAPI stream starts &nbsp; <b>0.0 ms</b>"]
+    A --> C["Capture thread: copy, downmix, resample to 16 kHz"]
+    C --> S["ASR worker: Moonshine streaming on ONNX Runtime"]
+    S -.->|"live text, 250 ms"| O["Overlay"]
     S --> F
-    F --> P["Deterministic<br/>formatting"]
-    P --> I["Insert at<br/>the cursor"]
+    K2["<b>Right Ctrl released</b>"] --> F["Refuse a new partial, collect the 20 ms tail, drain the stream"]
+    F --> P["Deterministic formatting: punctuation, capitals, dictionary"]
+    P --> I["<b>Insert at the cursor</b>"]
 
     classDef hot fill:#1c1d1e,stroke:#f0603c,stroke-width:2px,color:#f2f2f2
-    classDef warm fill:#1c1d1e,stroke:#555555,color:#d6d6d6
+    classDef warm fill:#242424,stroke:#666666,color:#d6d6d6
     class K,A,C,S,F,P,I hot
     class O,K2 warm
 ```
@@ -120,25 +120,22 @@ happen after the text is already on screen.
 Five threads, four of them asleep almost all the time:
 
 ```mermaid
-flowchart TB
-    subgraph msg["Message thread"]
-        direction TB
-        M1["Keyboard hook"]
-        M2["Overlay, 25 fps,<br/>only while visible"]
-        M3["Tray and settings"]
-    end
+flowchart LR
     subgraph aud["Capture thread"]
-        A1["Multimedia priority,<br/>copy and convert only"]
+        A1["Multimedia priority<br/>copy and convert only<br/>no allocation"]
     end
     subgraph asr["ASR worker"]
-        S1["One transcriber,<br/>one ONNX thread,<br/>above-normal priority"]
+        S1["One transcriber<br/>one ONNX thread<br/>above-normal priority"]
+    end
+    subgraph msg["Message thread"]
+        M1["Keyboard hook<br/>overlay at 25 fps<br/>tray and settings"]
     end
 
     aud -->|"16 kHz mono"| asr
     asr -->|"partial and final"| msg
 
-    classDef box fill:#1c1d1e,stroke:#555555,color:#d6d6d6
-    class msg,aud,asr,M1,M2,M3,A1,S1 box
+    classDef box fill:#1c1d1e,stroke:#f0603c,color:#f2f2f2
+    class A1,S1,M1 box
 ```
 
 ## Design decisions
