@@ -336,10 +336,13 @@ impl App {
         if !self.enabled || self.utterance.is_some() {
             return;
         }
-        let u = Utterance::begin();
-        self.utterance = Some(u);
-        self.overlay.set(OverlayState::Listening, "");
+        let mut u = Utterance::begin();
 
+        // Microphone first, screen second. Painting the overlay means an
+        // UpdateLayeredWindow and a ShowWindow on a topmost layered window,
+        // and doing that before arming put a fixed delay between the key going
+        // down and the first sample arriving. Every millisecond spent here is
+        // speech the user has already said and the recogniser will never see.
         self.first_packet.store(0, Ordering::SeqCst);
         self.level.store(0, Ordering::Relaxed);
         self.asr.begin();
@@ -350,9 +353,17 @@ impl App {
                 let msg = "no microphone";
                 eprintln!("{msg}");
                 self.overlay.set(OverlayState::Error, msg);
-                self.utterance = None;
+                return;
             }
         }
+        u.t0b_armed = trace::now();
+        if let Some(c) = self.capture.as_ref() {
+            u.reset_us = c.stats.last_reset_us.load(Ordering::Relaxed);
+            u.start_us = c.stats.last_start_us.load(Ordering::Relaxed);
+        }
+        self.utterance = Some(u);
+
+        self.overlay.set(OverlayState::Listening, "");
     }
 
     fn stop(&mut self) {
@@ -508,7 +519,8 @@ fn mic_test(secs: u64) {
         trace::ms_between(t_open, opened)
     );
 
-    // The number that matters: key-down to a running stream.
+    // The number that matters: key-down to a stream that is delivering.
+    first.store(0, Ordering::Relaxed);
     let t0 = trace::now();
     capture.arm();
     println!(
@@ -521,8 +533,10 @@ fn mic_test(secs: u64) {
     let peak = peak_milli.load(Ordering::Relaxed) as f32 / 1000.0;
     let stats = &capture.stats;
     println!(
-        "first packet after {:.1} ms",
-        trace::ms_between(t0, first.load(Ordering::Relaxed))
+        "first packet {:.1} ms after arm (reset {} us, start {} us)",
+        trace::ms_between(t0, first.load(Ordering::Relaxed)),
+        stats.last_reset_us.load(Ordering::Relaxed),
+        stats.last_start_us.load(Ordering::Relaxed)
     );
     println!(
         "{} samples in {secs} s = {:.0} Hz after conversion (target {})",

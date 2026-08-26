@@ -46,6 +46,12 @@ pub struct CaptureStats {
     pub packets: AtomicU32,
     pub glitches: AtomicU32,
     pub device_errors: AtomicU32,
+    /// Microseconds the last `IAudioClient::Start` took. Real traces showed a
+    /// quarter of a second between the hotkey and the first sample that the
+    /// lab could not reproduce, so the two halves of that gap are measured
+    /// separately: starting the stream, and waiting for it to deliver.
+    pub last_start_us: AtomicU32,
+    pub last_reset_us: AtomicU32,
 }
 
 struct Control {
@@ -328,9 +334,18 @@ where
                     if want {
                         // Reset while stopped throws away whatever the device
                         // buffered before the user asked to dictate.
+                        let t_reset = std::time::Instant::now();
                         let _ = client.Reset();
+                        stats
+                            .last_reset_us
+                            .store(t_reset.elapsed().as_micros() as u32, Ordering::Relaxed);
                         conv.reset();
-                        if client.Start().is_err() {
+                        let t_start = std::time::Instant::now();
+                        let started = client.Start();
+                        stats
+                            .last_start_us
+                            .store(t_start.elapsed().as_micros() as u32, Ordering::Relaxed);
+                        if started.is_err() {
                             stats.device_errors.fetch_add(1, Ordering::Relaxed);
                         } else {
                             running = true;

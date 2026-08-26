@@ -40,6 +40,10 @@ pub fn ms_between(a: i64, b: i64) -> f64 {
 #[derive(Default, Clone, Copy)]
 pub struct Utterance {
     pub t0_hotkey_down: i64,
+    /// When the microphone was actually started. Anything between this and
+    /// t0 is work the app did before it began listening, and it is speech the
+    /// user has already lost.
+    pub t0b_armed: i64,
     pub t1_first_packet: i64,
     pub t6_first_partial: i64,
     pub t7_hotkey_up: i64,
@@ -48,6 +52,10 @@ pub struct Utterance {
     pub t12_inserted: i64,
     pub chars: usize,
     pub audio_ms: f64,
+    /// Split of the arm cost, in microseconds, straight from the capture
+    /// thread: resetting the stream and starting it.
+    pub reset_us: u32,
+    pub start_us: u32,
 }
 
 impl Utterance {
@@ -65,6 +73,11 @@ impl Utterance {
 
     pub fn activation_ms(&self) -> f64 {
         ms_between(self.t0_hotkey_down, self.t1_first_packet)
+    }
+
+    /// Hotkey to microphone running. Should be almost nothing.
+    pub fn arm_ms(&self) -> f64 {
+        ms_between(self.t0_hotkey_down, self.t0b_armed)
     }
 
     pub fn finalisation_ms(&self) -> f64 {
@@ -85,15 +98,19 @@ impl Utterance {
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"user_perceived_ms\":{:.1},\"activation_ms\":{:.1},\"finalisation_ms\":{:.1},\
-             \"insertion_ms\":{:.1},\"first_partial_ms\":{:.1},\"audio_ms\":{:.0},\"chars\":{}}}",
+            "{{\"user_perceived_ms\":{:.1},\"activation_ms\":{:.1},\"arm_ms\":{:.1},\
+             \"finalisation_ms\":{:.1},\
+             \"insertion_ms\":{:.1},\"first_partial_ms\":{:.1},\"chars\":{},\
+             \"reset_us\":{},\"start_us\":{}}}",
             self.user_perceived_ms(),
             self.activation_ms(),
+            self.arm_ms(),
             self.finalisation_ms(),
             self.insertion_ms(),
             self.first_partial_ms(),
-            self.audio_ms,
-            self.chars
+            self.chars,
+            self.reset_us,
+            self.start_us
         )
     }
 }
