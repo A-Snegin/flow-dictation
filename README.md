@@ -102,12 +102,32 @@ above and the folder you unzipped.
 ## Sending it to someone else
 
 ```powershell
-.\scripts\package.ps1              # 22 MB, fetches the model on first run
-.\scripts\package.ps1 -WithModel   # 138 MB, works with no internet at all
+.\scriptsuild-installer.ps1              # 19 MB, fetches the model on first run
+.\scriptsuild-installer.ps1 -WithModel   # 134 MB, works with no internet
 ```
 
-Either produces a zip on your Desktop. They unzip it and run `Start Flow.bat`.
-No Rust, no Visual Studio, no installer, no administrator rights.
+Produces `dist\Flow-Setup.exe`. It installs per user, so there is no
+administrator prompt, and it adds a Start Menu entry, an uninstaller and an
+optional start-with-Windows. Uninstalling asks separately about the speech
+model and the dictionary, because someone reinstalling should not have to
+download 136 MB again and someone leaving should not be left with it.
+
+There is also `scripts\package.ps1`, which makes a plain zip with a batch file
+instead. Use it when an installer would be unwelcome, on a locked-down machine
+or where an unsigned setup is a harder sell than a folder.
+
+**The installer is not code signed.** Whoever you send it to will see
+"Windows protected your PC" and has to choose More info, then Run anyway. Warn
+them, or sign it:
+
+```powershell
+.\scriptsuild-installer.ps1 -WithModel -Sign -CertThumbprint <thumbprint>
+```
+
+That needs an Authenticode certificate. An OV certificate is a few hundred
+pounds a year and still builds reputation slowly; an EV certificate clears
+SmartScreen immediately and costs more. Worth it if this goes to clients,
+overkill for a handful of colleagues who can be told to expect the warning.
 
 Installed size on their machine is about 170 MB, nearly all of it the speech
 model:

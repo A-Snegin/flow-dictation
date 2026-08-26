@@ -4,3 +4,4 @@
 *.jsonl
 *.tar.gz
 /bench/corpus/*.wav
+/dist
