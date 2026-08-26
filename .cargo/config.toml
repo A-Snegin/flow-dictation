@@ -1,0 +1,5 @@
+# Build artefacts live outside OneDrive. target/ churns on every build and
+# syncing it costs CPU that lands directly in the latency numbers this project
+# is measured on.
+[build]
+target-dir = "C:/Users/anton/AppData/Local/Flow/target"

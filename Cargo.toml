@@ -17,6 +17,14 @@ path = "src/main.rs"
 name = "smoke"
 path = "src/bin/smoke.rs"
 
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "bench-e2e"
+path = "src/bin/bench_e2e.rs"
+
 [dependencies]
 
 [profile.release]
