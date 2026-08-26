@@ -96,8 +96,8 @@ term in the first place, and corrects the output afterwards if it did not.
 "anton" = "Anton"
 ```
 
-Choose "Reload dictionary" from the tray after editing. Hotkey and model changes
-need Flow restarted.
+Edit it in the settings window (tray, Open settings) or in the file directly.
+Changes apply on save; the hotkey and the model take effect when Flow restarts.
 
 The bias strength (`model.keyterm_boost`) defaults to 2.0. Upstream measured
 that as the point where terms come out most accurately; raising it starts
@@ -154,5 +154,7 @@ No LLM in the critical path. Formatting is deterministic string work measured in
 microseconds. A polish pass is a reasonable later feature, but it belongs after
 the text lands, not before.
 
-No Electron, no WebView, no settings window. The resident process is native and
-the settings are a text file.
+No Electron and no WebView. The settings window is plain Win32 controls,
+created when it opens and destroyed when it closes, so it costs nothing while
+it is shut. The settings file stays the source of truth and stays
+hand-editable; the window is a friendlier way to reach the same values.

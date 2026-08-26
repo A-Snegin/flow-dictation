@@ -10,6 +10,7 @@ pub mod hotkey;
 pub mod inject;
 pub mod overlay;
 pub mod settings;
+pub mod settings_ui;
 pub mod stats;
 pub mod target_app;
 pub mod trace;

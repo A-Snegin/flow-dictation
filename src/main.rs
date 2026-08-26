@@ -55,6 +55,29 @@ fn main() {
             let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(6);
             return overlay_demo(secs);
         }
+        Some("--settings") => {
+            // Opens just the settings window, with no recogniser behind it.
+            // Useful for checking the layout, and a way in if the tray icon is
+            // hidden in the notification-area overflow.
+            unsafe {
+                let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+                    windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                );
+            }
+            let (current, _) = Settings::load();
+            flow::settings_ui::open(&current);
+            let mut msg = MSG::default();
+            while flow::settings_ui::is_open() {
+                unsafe {
+                    MsgWaitForMultipleObjectsEx(None, 100, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                    while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+            }
+            return;
+        }
         Some("--which-app") => {
             let (settings, _) = Settings::load();
             let exe = target_app::foreground_executable();
@@ -76,7 +99,8 @@ fn main() {
                  flow-core --mic-test N   capture N seconds and report the audio path\n\
                  flow-core --dictate N    capture N seconds, transcribe, print (no insertion)
                  flow-core --which-app    report the focused app and how text would be inserted
-                 flow-core --overlay-demo N  drive the pill with a synthetic voice for N seconds"
+                 flow-core --overlay-demo N  drive the pill with a synthetic voice for N seconds
+                 flow-core --settings     open the settings window on its own"
             );
             return;
         }
@@ -287,20 +311,8 @@ fn main() {
             }
             Some(TrayCommand::LatencyReport) => println!("\n{}\n", trace::report()),
             Some(TrayCommand::OpenSettings) => {
-                // Notepad by name, not the shell's file association. Nothing
-                // owns .toml on a stock Windows install, so handing it to
-                // "start" produces the "how do you want to open this file"
-                // picker rather than the settings.
-                let path = Settings::path();
-                if std::process::Command::new("notepad.exe")
-                    .arg(path.as_os_str())
-                    .spawn()
-                    .is_err()
-                {
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", "", &path.to_string_lossy()])
-                        .spawn();
-                }
+                let (current, _) = Settings::load();
+                flow::settings_ui::open(&current);
             }
             Some(TrayCommand::ToggleAutostart) => match flow::autostart::toggle() {
                 Ok(on) => println!(
@@ -318,23 +330,26 @@ fn main() {
                 if let Some(p) = problem {
                     eprintln!("settings: {p}");
                 } else {
-                    if let Ok(mut f) = app.formatter.lock() {
-                        f.capitalise_sentences = fresh.formatting.capitalise_sentences;
-                        f.spoken_punctuation = fresh.formatting.spoken_punctuation;
-                        f.trailing_space = fresh.formatting.trailing_space;
-                        f.set_dictionary(&fresh.dictionary);
-                        app.asr.set_keyterms(&f.keyterms());
-                    }
-                    app.insertion = fresh.insertion.clone();
-                    println!(
-                        "Reloaded: {} dictionary entries, insertion {} / {} in terminals.",
-                        fresh.dictionary.len(),
-                        fresh.insertion.mode,
-                        fresh.insertion.terminal_mode
-                    );
+                    app.apply(&fresh);
+                    println!("Reloaded {} dictionary entries.", fresh.dictionary.len());
                 }
             }
             None => {}
+        }
+
+        if flow::settings_ui::take_saved() {
+            let (fresh, problem) = Settings::load();
+            if let Some(p) = problem {
+                eprintln!("settings: {p}");
+            } else {
+                app.apply(&fresh);
+                println!(
+                    "Settings saved. Insertion {} / {} in terminals, {} dictionary entries.",
+                    fresh.insertion.mode,
+                    fresh.insertion.terminal_mode,
+                    fresh.dictionary.len()
+                );
+            }
         }
 
         app.pump_hotkey(&hk_rx);
@@ -362,6 +377,21 @@ struct App {
 }
 
 impl App {
+    /// Applies the settings that can change without a restart. The hotkey is
+    /// hooked and the model is a warmed ONNX session; rebuilding either behind
+    /// the user's back would cost more than restarting and would surprise them
+    /// mid-sentence, so those two are left for the next launch.
+    fn apply(&mut self, fresh: &Settings) {
+        if let Ok(mut f) = self.formatter.lock() {
+            f.capitalise_sentences = fresh.formatting.capitalise_sentences;
+            f.spoken_punctuation = fresh.formatting.spoken_punctuation;
+            f.trailing_space = fresh.formatting.trailing_space;
+            f.set_dictionary(&fresh.dictionary);
+            self.asr.set_keyterms(&f.keyterms());
+        }
+        self.insertion = fresh.insertion.clone();
+    }
+
     fn pump_hotkey(&mut self, rx: &Receiver<HotkeyEvent>) {
         loop {
             match rx.try_recv() {

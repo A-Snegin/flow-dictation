@@ -167,6 +167,13 @@ impl Settings {
         }
     }
 
+    /// Writes the settings back, comments and all. Used by the settings window
+    /// and by first run, so a file the user has never opened and one they have
+    /// just edited through the UI look the same.
+    pub fn save(&self) -> std::io::Result<()> {
+        self.write_default(&Self::path())
+    }
+
     fn write_default(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
