@@ -18,9 +18,12 @@ use std::time::Duration;
 
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
+    SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_MENU, VK_RCONTROL, VK_SHIFT, VK_V,
@@ -192,6 +195,38 @@ fn read_clipboard_text() -> Option<String> {
     }
 }
 
+/// Two formats Windows honours on the clipboard, both meaning "do not keep a
+/// copy of this". Without them every dictation is captured by Clipboard History
+/// (Win+V) and, if it is turned on, synced to the user's Microsoft account:
+/// the text would leave the machine through a door Flow opened.
+fn mark_clipboard_transient() {
+    unsafe {
+        for name in [
+            windows::core::w!("ExcludeClipboardContentFromMonitorProcessing"),
+            windows::core::w!("CanIncludeInClipboardHistory"),
+            windows::core::w!("CanUploadToCloudClipboard"),
+        ] {
+            let format = RegisterClipboardFormatW(name);
+            if format == 0 {
+                continue;
+            }
+            // A single zero DWORD: "no" for the two that ask permission, and
+            // any value at all for the exclusion one.
+            if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, 4) {
+                let p = GlobalLock(h) as *mut u32;
+                if !p.is_null() {
+                    *p = 0;
+                    let _ = GlobalUnlock(h);
+                    // On failure the block leaks four bytes once per paste in
+                    // a case that does not arise; freeing it would risk a
+                    // double free if the clipboard did take ownership.
+                    let _ = SetClipboardData(format, Some(HANDLE(h.0)));
+                }
+            }
+        }
+    }
+}
+
 fn write_clipboard_text(text: &str) -> Result<(), String> {
     let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
@@ -223,6 +258,7 @@ fn write_clipboard_text(text: &str) -> Result<(), String> {
             // Ownership passes to the clipboard on success, so no free here.
             SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglobal.0)))
                 .map_err(|e| format!("SetClipboardData: {e}"))?;
+            mark_clipboard_transient();
             Ok(())
         })();
 

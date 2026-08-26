@@ -68,6 +68,57 @@ Costs: fonts, the memory DC and the bitmap are built once and reused, the whole
 thing repaints at 25 fps and only while it is on screen, and idle CPU with Flow
 resident measures 0.000 percent.
 
+## Privacy, precisely
+
+Your voice never leaves the machine, and no audio is ever written to disk. It
+lives in memory for as long as it takes to recognise, and that is all.
+
+What Flow does write, all of it local and all of it yours:
+
+| | |
+|---|---|
+| `%APPDATA%\Flow\settings.toml` | settings and your dictionary |
+| `%LOCALAPPDATA%\Flow	races.jsonl` | timings and a character count, never the text |
+| `%LOCALAPPDATA%\Flow\models` | the speech model |
+
+Two things worth knowing rather than assuming.
+
+Pasting means the text passes through the Windows clipboard for a moment.
+Windows Clipboard History (Win+V) would ordinarily keep a copy, and sync it to
+your Microsoft account if that is switched on, so every paste is marked with
+the formats that tell Windows not to: `CanIncludeInClipboardHistory`,
+`CanUploadToCloudClipboard` and `ExcludeClipboardContentFromMonitorProcessing`.
+Your previous clipboard contents are restored afterwards. Choosing `type`
+insertion avoids the clipboard entirely.
+
+Flow does not print what you dictated. It reports a length. Anything that
+redirects the process would otherwise write your dictation to a file, which is
+not a promise worth making and then quietly breaking. `FLOW_ECHO=1` turns the
+text on when you are debugging.
+
+To remove Flow completely: quit from the tray, then delete the two folders
+above and the folder you unzipped.
+
+## Sending it to someone else
+
+```powershell
+.\scripts\package.ps1              # 22 MB, fetches the model on first run
+.\scripts\package.ps1 -WithModel   # 138 MB, works with no internet at all
+```
+
+Either produces a zip on your Desktop. They unzip it and run `Start Flow.bat`.
+No Rust, no Visual Studio, no installer, no administrator rights.
+
+Installed size on their machine is about 170 MB, nearly all of it the speech
+model:
+
+| | |
+|---|---:|
+| `flow-core.exe` | 10 MB |
+| `onnxruntime.dll` | 14 MB |
+| small model | 136 MB |
+| tiny model, if they add it | 43 MB |
+
 ## Terminals
 
 Dictating into PowerShell, cmd or Windows Terminal is handled separately from

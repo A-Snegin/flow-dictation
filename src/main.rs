@@ -660,11 +660,19 @@ impl App {
                         // Painted after the text is already in the target
                         // application, so it costs the user nothing.
                         self.overlay.set(OverlayState::Done, formatted.trim());
-                        println!(
-                            "{:>6.0} ms  {}",
-                            u.user_perceived_ms(),
-                            formatted.trim()
-                        );
+                        // Length only. Printing the text means anything that
+                        // redirects this process writes the user's dictation
+                        // to a file, which is not a promise Flow gets to make
+                        // and then quietly break. FLOW_ECHO=1 opts in.
+                        if echo_transcripts() {
+                            println!("{:>6.0} ms  {}", u.user_perceived_ms(), formatted.trim());
+                        } else {
+                            println!(
+                                "{:>6.0} ms  {} characters",
+                                u.user_perceived_ms(),
+                                formatted.trim().chars().count()
+                            );
+                        }
                     }
                     trace::record(&u);
                 }
@@ -675,6 +683,12 @@ impl App {
             }
         }
     }
+}
+
+/// Whether to print what was dictated. Off unless asked: the text is the whole
+/// point of the privacy promise, and stdout is a file as often as not.
+fn echo_transcripts() -> bool {
+    std::env::var("FLOW_ECHO").map(|v| v == "1").unwrap_or(false)
 }
 
 /// What to print on the pill's key cap. The user is holding a physical key;
@@ -814,7 +828,9 @@ fn dictate_once(secs: u64) {
     while Instant::now() < deadline {
         while let Ok(ev) = asr.events.try_recv() {
             if let Event::Partial { text } = ev {
-                println!("  partial: {text}");
+                if echo_transcripts() {
+                    println!("  partial: {text}");
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(20));
