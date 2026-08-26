@@ -11,7 +11,7 @@
 //!    That caps the key-up wait at whatever call was already running.
 
 use crate::asr::{join, Line, Transcriber};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -70,6 +70,38 @@ struct Staging {
     buf: Vec<f32>,
 }
 
+/// Where to post a wake-up when an event is queued, so the UI thread can sit
+/// in a blocking wait instead of polling. Zero means nobody is listening.
+#[derive(Clone, Default)]
+pub struct Waker {
+    thread_id: Arc<AtomicU32>,
+    message: u32,
+}
+
+impl Waker {
+    pub fn for_current_thread(message: u32) -> Waker {
+        let id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        Waker {
+            thread_id: Arc::new(AtomicU32::new(id)),
+            message,
+        }
+    }
+
+    fn wake(&self) {
+        let id = self.thread_id.load(Ordering::Relaxed);
+        if id != 0 {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+                    id,
+                    self.message,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                );
+            }
+        }
+    }
+}
+
 pub struct AsrService {
     cmd: Sender<Cmd>,
     staging: Arc<Mutex<Staging>>,
@@ -83,9 +115,20 @@ pub struct AsrService {
 
 impl AsrService {
     pub fn spawn(transcriber: Transcriber, config: Config) -> AsrService {
+        Self::spawn_with(transcriber, config, AudioSink::new(), Waker::default())
+    }
+
+    /// Takes a sink created earlier, so the audio device can be opened in
+    /// parallel with loading the model rather than after it.
+    pub fn spawn_with(
+        transcriber: Transcriber,
+        config: Config,
+        sink: AudioSink,
+        waker: Waker,
+    ) -> AsrService {
         let (cmd_tx, cmd_rx) = channel::<Cmd>();
         let (ev_tx, ev_rx) = channel::<Event>();
-        let staging = Arc::new(Mutex::new(Staging::default()));
+        let staging = sink.staging;
         let release_pending = Arc::new(AtomicBool::new(false));
         let release_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
@@ -104,6 +147,7 @@ impl AsrService {
                         staging,
                         release_pending,
                         release_at,
+                        waker,
                     )
                 })
                 .expect("spawn asr thread")
@@ -157,13 +201,26 @@ impl AsrService {
     }
 }
 
-/// Write-only handle to the ASR worker's input buffer.
+/// Write-only handle to the ASR worker's input buffer. Created before the
+/// worker so the capture device can be opened while the model is still loading.
 #[derive(Clone)]
 pub struct AudioSink {
     staging: Arc<Mutex<Staging>>,
 }
 
+impl Default for AudioSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioSink {
+    pub fn new() -> AudioSink {
+        AudioSink {
+            staging: Arc::new(Mutex::new(Staging::default())),
+        }
+    }
+
     pub fn push(&self, samples: &[f32]) {
         if let Ok(mut s) = self.staging.lock() {
             s.buf.extend_from_slice(samples);
@@ -195,6 +252,7 @@ fn worker_loop(
     staging: Arc<Mutex<Staging>>,
     release_pending: Arc<AtomicBool>,
     release_at: Arc<Mutex<Option<Instant>>>,
+    waker: Waker,
 ) {
     const SR: i32 = 16_000;
     let mut spare: Vec<f32> = Vec::with_capacity(SR as usize * 2);
@@ -260,6 +318,7 @@ fn worker_loop(
                         let text = join(&lines);
                         if !text.is_empty() {
                             let _ = ev_tx.send(Event::Partial { text });
+                            waker.wake();
                         }
                     }
                     Err(e) => {
@@ -306,6 +365,7 @@ fn worker_loop(
             drain,
             total: released_at.elapsed(),
         });
+        waker.wake();
 
         release_pending.store(false, Ordering::SeqCst);
     }

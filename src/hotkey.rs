@@ -52,18 +52,25 @@ struct HookState {
     key: u32,
     tx: Sender<HotkeyEvent>,
     held: AtomicBool,
+    /// Thread and message used to wake the message loop, so a key event is
+    /// serviced immediately rather than at the next poll.
+    thread_id: u32,
+    wake_message: u32,
 }
 
 static STATE: OnceLock<HookState> = OnceLock::new();
 
 /// Installs the hook on the calling thread. That thread must run a message
 /// loop, or the hook never fires.
-pub fn install(key: u32, tx: Sender<HotkeyEvent>) -> Result<HHOOK, String> {
+pub fn install(key: u32, tx: Sender<HotkeyEvent>, wake_message: u32) -> Result<HHOOK, String> {
+    let thread_id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
     STATE
         .set(HookState {
             key,
             tx,
             held: AtomicBool::new(false),
+            thread_id,
+            wake_message,
         })
         .map_err(|_| "hotkey hook already installed".to_string())?;
 
@@ -79,6 +86,17 @@ pub fn uninstall(hook: HHOOK) {
     }
 }
 
+fn wake(state: &HookState) {
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+            state.thread_id,
+            state.wake_message,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+}
+
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         if let Some(state) = STATE.get() {
@@ -89,11 +107,13 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                         // Auto-repeat fires this repeatedly; only the edge counts.
                         if !state.held.swap(true, Ordering::SeqCst) {
                             let _ = state.tx.send(HotkeyEvent::Down);
+                            wake(state);
                         }
                     }
                     WM_KEYUP | WM_SYSKEYUP => {
                         if state.held.swap(false, Ordering::SeqCst) {
                             let _ = state.tx.send(HotkeyEvent::Up);
+                            wake(state);
                         }
                     }
                     _ => {}

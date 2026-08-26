@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use flow::asr::Transcriber;
-use flow::asr_service::{AsrService, Config, Event};
+use flow::asr_service::{AsrService, AudioSink, Config, Event, Waker};
 use flow::audio::Capture;
 use flow::format::Formatter;
 use flow::hotkey::{self, HotkeyEvent};
@@ -23,8 +23,14 @@ use flow::trace::{self, Utterance};
 use flow::tray::{Tray, TrayCommand};
 
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage,
+    MWMO_INPUTAVAILABLE, MSG, PM_REMOVE, QS_ALLINPUT,
 };
+
+/// Posted to the message thread whenever there is something to service, so the
+/// loop can block rather than poll. Polling cost 1.4% of a core at idle and put
+/// up to 2 ms between the final transcript and the paste.
+const WM_FLOW_WAKE: u32 = 0x0400 + 2;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -89,6 +95,25 @@ fn main() {
 
     // ---- Warm everything before the user can possibly press the key -------
     let boot = Instant::now();
+
+    // Opening the capture device costs about 320 ms and loading the model about
+    // 700 ms. Neither depends on the other, so they overlap. The sink exists
+    // before either, which is what lets the device start filling it.
+    let sink = AudioSink::new();
+    let first_packet = Arc::new(AtomicI64::new(0));
+    let capture_thread = {
+        let sink = sink.clone();
+        let first = Arc::clone(&first_packet);
+        std::thread::spawn(move || {
+            Capture::open(move |samples| {
+                if first.load(Ordering::Relaxed) == 0 {
+                    first.store(trace::now(), Ordering::Relaxed);
+                }
+                sink.push(samples);
+            })
+        })
+    };
+
     println!("Flow: loading {} ...", model_dir.display());
     let keyterm_boost = settings.model.keyterm_boost.to_string();
     let transcriber = match Transcriber::load(
@@ -119,18 +144,20 @@ fn main() {
     let mut warm = vec![0.0f32; 8_000];
     let _ = transcriber.transcribe_once(&mut warm, 16_000);
 
-    let asr = Arc::new(AsrService::spawn(
+    let asr = Arc::new(AsrService::spawn_with(
         transcriber,
         Config {
             partial_cadence: Duration::from_millis(settings.model.partial_cadence_ms),
             force_partials: settings.model.force_partials,
             release_tail: Duration::from_millis(settings.model.release_tail_ms),
         },
+        sink,
+        Waker::for_current_thread(WM_FLOW_WAKE),
     ));
 
     // ---- Hotkey hook and tray, both on this thread -----------------------
     let (hk_tx, hk_rx) = channel::<HotkeyEvent>();
-    let hook = match hotkey::install(hotkey_vk, hk_tx) {
+    let hook = match hotkey::install(hotkey_vk, hk_tx, WM_FLOW_WAKE) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("could not install the hotkey hook: {e}");
@@ -157,24 +184,17 @@ fn main() {
     );
     println!("Settings: {}", Settings::path().display());
 
-    // The device is opened once, here, and only started when the key goes
-    // down. Opening it per utterance measured 322 ms, which would clip the
-    // first word every time.
-    let first_packet = Arc::new(AtomicI64::new(0));
-    let capture = {
-        let sink = asr.audio_sink();
-        let first = Arc::clone(&first_packet);
-        match Capture::open(move |samples| {
-            if first.load(Ordering::Relaxed) == 0 {
-                first.store(trace::now(), Ordering::Relaxed);
-            }
-            sink.push(samples);
-        }) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                eprintln!("microphone unavailable: {e}");
-                None
-            }
+    // The device was opened above, in parallel with the model, and is only
+    // started when the key goes down.
+    let capture = match capture_thread.join() {
+        Ok(Ok(c)) => Some(c),
+        Ok(Err(e)) => {
+            eprintln!("microphone unavailable: {e}");
+            None
+        }
+        Err(_) => {
+            eprintln!("microphone thread panicked");
+            None
         }
     };
 
@@ -190,12 +210,13 @@ fn main() {
     };
 
     // ---- Message pump ----------------------------------------------------
-    // The hook needs this thread pumping messages or it never fires. Peek then
-    // sleep rather than GetMessage, so hotkey and ASR events are serviced in
-    // the same loop with a bounded 2 ms of latency and no busy spin.
+    // The hook needs this thread pumping messages or it never fires. The loop
+    // blocks until something arrives: a Windows message, or a wake posted by
+    // the hook or the ASR worker. The 250 ms timeout is only a safety net.
     let mut msg = MSG::default();
     loop {
         unsafe {
+            MsgWaitForMultipleObjectsEx(None, 250, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -247,8 +268,6 @@ fn main() {
 
         app.pump_hotkey(&hk_rx);
         app.pump_asr();
-
-        std::thread::sleep(Duration::from_millis(2));
     }
 
     hotkey::uninstall(hook);
