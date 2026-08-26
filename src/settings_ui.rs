@@ -65,7 +65,12 @@ const PROFILES: &[(&str, &str)] = &[
     ("balanced", "Balanced: small model, more accurate"),
     ("fast", "Fast: tiny model, about twice as quick"),
 ];
-const MODES: &[(&str, &str)] = &[("paste", "Paste"), ("type", "Type keystrokes")];
+/// The labels say what the choice costs, because in an ordinary text box the
+/// two produce identical text and the difference only shows up elsewhere.
+const MODES: &[(&str, &str)] = &[
+    ("paste", "Paste: instant, borrows the clipboard"),
+    ("type", "Type: slower on long text, no clipboard"),
+];
 
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static SAVED: AtomicBool = AtomicBool::new(false);
@@ -454,7 +459,7 @@ unsafe fn create(settings: &Settings) {
         let note = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("STATIC"),
-            w!("The key and the model take effect when Flow restarts. Everything else applies on save."),
+            w!("Everything here applies when you save. Changing the model reloads it, about a second."),
             windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(
                 WS_CHILD.0 | WS_VISIBLE.0,
             ),

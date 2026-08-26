@@ -37,7 +37,7 @@ pub fn ms_between(a: i64, b: i64) -> f64 {
 }
 
 /// One dictation, from key-down to text on screen.
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Utterance {
     pub t0_hotkey_down: i64,
     /// When the microphone was actually started. Anything between this and
@@ -60,6 +60,33 @@ pub struct Utterance {
     /// Near zero with text in the transcript would mean the level plumbing is
     /// broken rather than the microphone.
     pub peak_level: f32,
+    /// How the text was put in, and whether the target was treated as a
+    /// terminal. Paste is flat in the number of characters and typing is not,
+    /// so without this the insertion timings cannot be compared.
+    pub insert_mode: &'static str,
+    pub terminal: bool,
+}
+
+impl Default for Utterance {
+    fn default() -> Self {
+        Utterance {
+            t0_hotkey_down: 0,
+            t0b_armed: 0,
+            t1_first_packet: 0,
+            t6_first_partial: 0,
+            t7_hotkey_up: 0,
+            t9_final_ready: 0,
+            t10_formatted: 0,
+            t12_inserted: 0,
+            chars: 0,
+            audio_ms: 0.0,
+            reset_us: 0,
+            start_us: 0,
+            peak_level: 0.0,
+            insert_mode: "none",
+            terminal: false,
+        }
+    }
 }
 
 impl Utterance {
@@ -105,7 +132,7 @@ impl Utterance {
             "{{\"user_perceived_ms\":{:.1},\"activation_ms\":{:.1},\"arm_ms\":{:.1},\
              \"finalisation_ms\":{:.1},\
              \"insertion_ms\":{:.1},\"first_partial_ms\":{:.1},\"chars\":{},\
-             \"reset_us\":{},\"start_us\":{},\"peak_level\":{:.3}}}",
+             \"reset_us\":{},\"start_us\":{},\"peak_level\":{:.3},             \"insert_mode\":\"{}\",\"terminal\":{}}}",
             self.user_perceived_ms(),
             self.activation_ms(),
             self.arm_ms(),
@@ -115,7 +142,9 @@ impl Utterance {
             self.chars,
             self.reset_us,
             self.start_us,
-            self.peak_level
+            self.peak_level,
+            self.insert_mode,
+            self.terminal
         )
     }
 }

@@ -204,6 +204,7 @@ fn main() {
     let mut warm = vec![0.0f32; 8_000];
     let _ = transcriber.transcribe_once(&mut warm, 16_000);
 
+    let sink_for_app = sink.clone();
     let asr = Arc::new(AsrService::spawn_with(
         transcriber,
         Config {
@@ -266,6 +267,9 @@ fn main() {
 
     let mut app = App {
         asr,
+        sink: sink_for_app,
+        loaded_profile: settings.model.profile.clone(),
+        loaded_single_thread: settings.model.single_thread,
         formatter,
         insertion,
         capture,
@@ -277,6 +281,10 @@ fn main() {
         overlay,
     };
 
+    // Notice edits made outside the app: someone with the file open in an
+    // editor should not have to know that only the window counts.
+    let mut settings_stamp = Settings::modified();
+
     // ---- Message pump ----------------------------------------------------
     // The hook needs this thread pumping messages or it never fires. The loop
     // blocks until something arrives: a Windows message, or a wake posted by
@@ -285,11 +293,14 @@ fn main() {
     loop {
         // While the pill is up, wake often enough to animate the meter.
         // Otherwise sleep until something actually happens.
+        // Two seconds when idle rather than forever, so an edit to the file
+        // is picked up without the loop having to be woken by something else.
+        // Half a wake a second to stat one file does not register.
         let wait = app
             .overlay
             .tick()
             .map(|d| d.as_millis() as u32)
-            .unwrap_or(u32::MAX);
+            .unwrap_or(2_000);
 
         unsafe {
             MsgWaitForMultipleObjectsEx(None, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
@@ -337,14 +348,21 @@ fn main() {
             None => {}
         }
 
-        if flow::settings_ui::take_saved() {
+        let stamp = Settings::modified();
+        let file_changed = stamp != settings_stamp;
+        if file_changed {
+            settings_stamp = stamp;
+        }
+        if flow::settings_ui::take_saved() || file_changed {
             let (fresh, problem) = Settings::load();
             if let Some(p) = problem {
                 eprintln!("settings: {p}");
             } else {
                 app.apply(&fresh);
                 println!(
-                    "Settings saved. Insertion {} / {} in terminals, {} dictionary entries.",
+                    "Settings applied: hold {}, {} profile, insertion {} / {} in terminals, {} dictionary entries.",
+                    fresh.hotkey.key,
+                    fresh.model.profile,
                     fresh.insertion.mode,
                     fresh.insertion.terminal_mode,
                     fresh.dictionary.len()
@@ -361,6 +379,13 @@ fn main() {
 
 struct App {
     asr: Arc<AsrService>,
+    /// Held so the recogniser can be rebuilt without disturbing the capture
+    /// thread, which was handed a clone of this sink at startup.
+    sink: AudioSink,
+    /// What is currently loaded, so a save only pays for a reload when the
+    /// model actually changed.
+    loaded_profile: String,
+    loaded_single_thread: bool,
     formatter: Arc<Mutex<Formatter>>,
     insertion: Insertion,
     /// Open for the life of the process, started only while the key is held.
@@ -377,10 +402,10 @@ struct App {
 }
 
 impl App {
-    /// Applies the settings that can change without a restart. The hotkey is
-    /// hooked and the model is a warmed ONNX session; rebuilding either behind
-    /// the user's back would cost more than restarting and would surprise them
-    /// mid-sentence, so those two are left for the next launch.
+    /// Applies saved settings to the running app. Everything applies: a
+    /// setting that quietly needs a restart is indistinguishable from a setting
+    /// that does nothing, which is not a distinction worth asking anyone to
+    /// hold in their head.
     fn apply(&mut self, fresh: &Settings) {
         if let Ok(mut f) = self.formatter.lock() {
             f.capitalise_sentences = fresh.formatting.capitalise_sentences;
@@ -390,6 +415,95 @@ impl App {
             self.asr.set_keyterms(&f.keyterms());
         }
         self.insertion = fresh.insertion.clone();
+
+        // The hook stays where it is; only the key it watches changes.
+        if let Some(vk) = hotkey::vk::from_name(&fresh.hotkey.key) {
+            hotkey::rebind(vk);
+        }
+
+        let model_changed = fresh.model.profile != self.loaded_profile
+            || fresh.model.single_thread != self.loaded_single_thread;
+        if model_changed {
+            self.reload_model(fresh);
+        } else {
+            self.asr.set_config(Config {
+                partial_cadence: Duration::from_millis(fresh.model.partial_cadence_ms),
+                force_partials: fresh.model.force_partials,
+                release_tail: Duration::from_millis(fresh.model.release_tail_ms),
+            });
+        }
+    }
+
+    /// Swaps the recogniser for a different model, or the same model with
+    /// different threading. Costs roughly the startup load, and the capture
+    /// thread is untouched throughout: it keeps writing into the same sink,
+    /// which the new worker picks up.
+    fn reload_model(&mut self, fresh: &Settings) {
+        let (dir, arch) = fresh.resolve_model();
+        if !dir.join("streaming_config.json").exists() {
+            eprintln!(
+                "no model at {}. Run scripts\\fetch-model.ps1 for the {} profile.",
+                dir.display(),
+                fresh.model.profile
+            );
+            self.overlay
+                .set(OverlayState::Error, "that model is not downloaded");
+            return;
+        }
+
+        // The library reads this when it builds session options, so it has to
+        // be set before the transcriber is constructed.
+        if fresh.model.single_thread {
+            std::env::set_var("MOONSHINE_ORT_SINGLE_THREAD", "1");
+        } else {
+            std::env::remove_var("MOONSHINE_ORT_SINGLE_THREAD");
+        }
+
+        let boost = fresh.model.keyterm_boost.to_string();
+        let started = Instant::now();
+        let transcriber = match Transcriber::load(
+            &dir.to_string_lossy(),
+            arch,
+            &[("keyterm_boost", boost.as_str())],
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("could not load {}: {e}", dir.display());
+                self.overlay.set(OverlayState::Error, "could not load that model");
+                return;
+            }
+        };
+
+        if let Ok(f) = self.formatter.lock() {
+            let terms = f.keyterms();
+            if !terms.is_empty() {
+                let _ = transcriber.set_keyterms(&terms);
+            }
+        }
+        let mut warm = vec![0.0f32; 8_000];
+        let _ = transcriber.transcribe_once(&mut warm, 16_000);
+
+        // Dropping the old service joins its worker, so the two never share the
+        // sink; the new one starts from an empty buffer.
+        self.asr = Arc::new(AsrService::spawn_with(
+            transcriber,
+            Config {
+                partial_cadence: Duration::from_millis(fresh.model.partial_cadence_ms),
+                force_partials: fresh.model.force_partials,
+                release_tail: Duration::from_millis(fresh.model.release_tail_ms),
+            },
+            self.sink.clone(),
+            Waker::for_current_thread(WM_FLOW_WAKE),
+        ));
+        self.sink.clear();
+        self.loaded_profile = fresh.model.profile.clone();
+        self.loaded_single_thread = fresh.model.single_thread;
+        println!(
+            "Model reloaded: {} profile, {}, in {:?}",
+            fresh.model.profile,
+            if fresh.model.single_thread { "single threaded" } else { "multi threaded" },
+            started.elapsed()
+        );
     }
 
     fn pump_hotkey(&mut self, rx: &Receiver<HotkeyEvent>) {
@@ -513,6 +627,11 @@ impl App {
                         };
                         let mode = inject::Mode::from_name(mode_name);
                         u.chars = formatted.chars().count();
+                        u.terminal = terminal;
+                        u.insert_mode = match mode {
+                            inject::Mode::Paste => "paste",
+                            inject::Mode::Type => "type",
+                        };
                         if let Err(e) = inject::insert(&formatted, mode) {
                             eprintln!("insertion failed: {e}");
                             self.overlay.set(OverlayState::Error, &e);

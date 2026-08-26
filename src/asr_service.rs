@@ -33,6 +33,7 @@ pub enum Event {
     Error(String),
 }
 
+#[derive(Clone, Copy)]
 pub struct Config {
     /// Minimum gap between partial calls. The library also throttles itself to
     /// 200 ms of new audio unless `force` is set.
@@ -59,6 +60,7 @@ enum Cmd {
     Begin,
     Release,
     SetKeyterms(String),
+    SetConfig(Config),
     Shutdown,
 }
 
@@ -182,6 +184,12 @@ impl AsrService {
         }
     }
 
+    /// Changes the timing knobs on the running worker. Applied between
+    /// utterances, so a change cannot land halfway through one.
+    pub fn set_config(&self, config: Config) {
+        let _ = self.cmd.send(Cmd::SetConfig(config));
+    }
+
     /// Replaces the decoder's biasing terms. Applied by the worker between
     /// utterances, so it never interrupts one in progress.
     pub fn set_keyterms(&self, terms: &str) {
@@ -263,7 +271,7 @@ fn raise_priority() {
 
 fn worker_loop(
     transcriber: Transcriber,
-    config: Config,
+    mut config: Config,
     cmd_rx: Receiver<Cmd>,
     ev_tx: Sender<Event>,
     staging: Arc<Mutex<Staging>>,
@@ -283,6 +291,10 @@ fn worker_loop(
                 if let Err(e) = transcriber.set_keyterms(&terms) {
                     let _ = ev_tx.send(Event::Error(format!("keyterms rejected: {e}")));
                 }
+                continue;
+            }
+            Ok(Cmd::SetConfig(fresh)) => {
+                config = fresh;
                 continue;
             }
             Ok(Cmd::Shutdown) | Err(_) => return,
@@ -324,6 +336,7 @@ fn worker_loop(
                         let _ = ev_tx.send(Event::Error(format!("keyterms rejected: {e}")));
                     }
                 }
+                Ok(Cmd::SetConfig(fresh)) => config = fresh,
                 Ok(Cmd::Begin) => {}
                 Err(_) => {}
             }

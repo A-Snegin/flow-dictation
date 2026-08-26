@@ -97,7 +97,9 @@ term in the first place, and corrects the output afterwards if it did not.
 ```
 
 Edit it in the settings window (tray, Open settings) or in the file directly.
-Changes apply on save; the hotkey and the model take effect when Flow restarts.
+Either way it applies straight away: the window saves and the app reloads, and
+a file edited in an editor is noticed within a couple of seconds. Nothing needs
+a restart, including the hotkey and the model.
 
 The bias strength (`model.keyterm_boost`) defaults to 2.0. Upstream measured
 that as the point where terms come out most accurately; raising it starts

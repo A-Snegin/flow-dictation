@@ -167,6 +167,12 @@ impl Settings {
         }
     }
 
+    /// When the settings file was last written, for noticing edits made
+    /// outside the app. None when there is no file yet.
+    pub fn modified() -> Option<std::time::SystemTime> {
+        std::fs::metadata(Self::path()).ok()?.modified().ok()
+    }
+
     /// Writes the settings back, comments and all. Used by the settings window
     /// and by first run, so a file the user has never opened and one they have
     /// just edited through the UI look the same.

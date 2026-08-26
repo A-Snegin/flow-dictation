@@ -8,7 +8,7 @@
 //! does the absolute minimum: compare a virtual key, set a flag, post to a
 //! channel, return. Everything else happens on other threads.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 
@@ -49,7 +49,11 @@ pub mod vk {
 }
 
 struct HookState {
-    key: u32,
+    /// Which virtual key to watch. Atomic so the binding can be changed while
+    /// the hook stays installed: a setting that needs a restart to take effect
+    /// is indistinguishable, from the user's side, from a setting that does
+    /// nothing at all.
+    key: AtomicU32,
     tx: Sender<HotkeyEvent>,
     held: AtomicBool,
     /// Thread and message used to wake the message loop, so a key event is
@@ -66,7 +70,7 @@ pub fn install(key: u32, tx: Sender<HotkeyEvent>, wake_message: u32) -> Result<H
     let thread_id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
     STATE
         .set(HookState {
-            key,
+            key: AtomicU32::new(key),
             tx,
             held: AtomicBool::new(false),
             thread_id,
@@ -77,6 +81,16 @@ pub fn install(key: u32, tx: Sender<HotkeyEvent>, wake_message: u32) -> Result<H
     unsafe {
         SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)
             .map_err(|e| format!("SetWindowsHookExW: {e}"))
+    }
+}
+
+/// Changes which key starts dictation, without touching the hook itself.
+pub fn rebind(key: u32) {
+    if let Some(state) = STATE.get() {
+        // If the old key is somehow still down, forget it: the release will
+        // arrive for a key nobody is watching any more.
+        state.held.store(false, Ordering::SeqCst);
+        state.key.store(key, Ordering::SeqCst);
     }
 }
 
@@ -101,7 +115,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     if code >= 0 {
         if let Some(state) = STATE.get() {
             let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-            if info.vkCode == state.key {
+            if info.vkCode == state.key.load(Ordering::Relaxed) {
                 match wparam.0 as u32 {
                     WM_KEYDOWN | WM_SYSKEYDOWN => {
                         // Auto-repeat fires this repeatedly; only the edge counts.
