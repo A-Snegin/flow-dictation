@@ -53,7 +53,8 @@ fn main() {
         }
         Some("--overlay-demo") => {
             let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(6);
-            return overlay_demo(secs);
+            let text = if args.len() > 2 { args[2..].join(" ") } else { String::new() };
+            return overlay_demo(secs, &text);
         }
         Some("--settings") => {
             // Opens just the settings window, with no recogniser behind it.
@@ -870,7 +871,7 @@ fn dictate_once(secs: u64) {
 /// part of the app that cannot be verified without a person in the room. This
 /// feeds it a level that rises and falls like speech so the animation can be
 /// seen, screenshotted and compared after a change.
-fn overlay_demo(secs: u64) {
+fn overlay_demo(secs: u64, text: &str) {
     use flow::overlay::LISTENING_TICK;
     use std::sync::atomic::AtomicU32;
 
@@ -901,14 +902,17 @@ fn overlay_demo(secs: u64) {
         let peak = 0.02 + syllable * breath * 0.32;
         level.store((peak * 1000.0) as u32, Ordering::Relaxed);
 
+        let script: &str = if text.is_empty() {
+            "this is what it looks like when the words keep coming"
+        } else {
+            text
+        };
         if frame == 40 {
-            overlay.set(OverlayState::Listening, "this is what it looks like when");
+            let half: String = script.chars().take(script.chars().count() / 2).collect();
+            overlay.set(OverlayState::Listening, half.trim());
         }
         if frame == 90 {
-            overlay.set(
-                OverlayState::Listening,
-                "this is what it looks like when the words keep coming and the line has to scroll",
-            );
+            overlay.set(OverlayState::Listening, script);
         }
         overlay.tick();
 

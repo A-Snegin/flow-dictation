@@ -41,10 +41,10 @@ one per line:
   Lift-Off Consulting
   DDDM
 
-Those are biased while it listens, so it is more likely to get them right in
-the first place, and corrected afterwards if it did not.
+Those terms are given to the recogniser while it listens, so it is more likely
+to get them right. The same list corrects the output afterwards if it did not.
 
-If a term is heard one way and should be written another, use both sides:
+When a term is heard one way and should be written another, use both sides:
 
   lift off = Lift-Off
 
@@ -65,7 +65,7 @@ IF SOMETHING IS WRONG
     application may have taken the same key; try a different one in settings.
 
   The first word is missing
-    Start speaking a moment after pressing, rather than at the same time.
+    Press the key, then start speaking a moment later.
 
   It types into the wrong place
     Flow inserts wherever the cursor is. Click into the box you want first.
