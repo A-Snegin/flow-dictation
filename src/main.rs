@@ -51,6 +51,10 @@ fn main() {
             let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
             return dictate_once(secs);
         }
+        Some("--overlay-demo") => {
+            let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(6);
+            return overlay_demo(secs);
+        }
         Some("--which-app") => {
             let (settings, _) = Settings::load();
             let exe = target_app::foreground_executable();
@@ -71,7 +75,8 @@ fn main() {
                 "flow-core                run the tray app\n\
                  flow-core --mic-test N   capture N seconds and report the audio path\n\
                  flow-core --dictate N    capture N seconds, transcribe, print (no insertion)
-                 flow-core --which-app    report the focused app and how text would be inserted"
+                 flow-core --which-app    report the focused app and how text would be inserted
+                 flow-core --overlay-demo N  drive the pill with a synthetic voice for N seconds"
             );
             return;
         }
@@ -648,4 +653,71 @@ fn dictate_once(secs: u64) {
             }
         }
     }
+}
+
+/// Shows the pill and drives the meter from a synthetic speech envelope.
+///
+/// The waveform can only be checked by talking at it, which makes it the one
+/// part of the app that cannot be verified without a person in the room. This
+/// feeds it a level that rises and falls like speech so the animation can be
+/// seen, screenshotted and compared after a change.
+fn overlay_demo(secs: u64) {
+    use flow::overlay::LISTENING_TICK;
+    use std::sync::atomic::AtomicU32;
+
+    let (settings, _) = Settings::load();
+    let level = Arc::new(AtomicU32::new(0));
+    let mut overlay = match Overlay::create(&hotkey_label(&settings.hotkey.key)) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("overlay unavailable: {e}");
+            std::process::exit(1);
+        }
+    };
+    overlay.attach_level(Arc::clone(&level));
+    overlay.set(OverlayState::Listening, "");
+
+    println!(
+        "drawable: {}, driving the pill for {secs} s ...",
+        overlay.is_drawable()
+    );
+    let start = Instant::now();
+    let mut frame = 0u32;
+    while start.elapsed() < Duration::from_secs(secs) {
+        // Syllables: a fast rise and a slower fall, a few times a second, over
+        // a range that matches what a laptop microphone actually produces.
+        let t = frame as f32 * LISTENING_TICK.as_secs_f32();
+        let syllable = ((t * 3.7).sin() * 0.5 + 0.5).powf(2.2);
+        let breath = (t * 0.4).sin() * 0.5 + 0.5;
+        let peak = 0.02 + syllable * breath * 0.32;
+        level.store((peak * 1000.0) as u32, Ordering::Relaxed);
+
+        if frame == 40 {
+            overlay.set(OverlayState::Listening, "this is what it looks like when");
+        }
+        if frame == 90 {
+            overlay.set(
+                OverlayState::Listening,
+                "this is what it looks like when the words keep coming and the line has to scroll",
+            );
+        }
+        overlay.tick();
+
+        // A layered window still needs its thread to pump messages, or the
+        // compositor treats the window as unresponsive and never shows it.
+        let mut msg = MSG::default();
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        std::thread::sleep(LISTENING_TICK);
+        frame += 1;
+    }
+
+    overlay.set(OverlayState::Done, "and this is the confirmation");
+    std::thread::sleep(Duration::from_millis(1200));
+    overlay.set(OverlayState::Hidden, "");
 }

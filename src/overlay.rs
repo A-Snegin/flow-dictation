@@ -235,6 +235,13 @@ impl Overlay {
         self.visible
     }
 
+    /// Whether the drawing resources were built. Without them the window
+    /// exists and is shown but every pixel stays transparent, which looks
+    /// exactly like the overlay not working at all.
+    pub fn is_drawable(&self) -> bool {
+        self.gdi.is_some()
+    }
+
     /// Hands the overlay the counter the capture thread writes peaks into.
     pub fn attach_level(&mut self, source: Arc<AtomicU32>) {
         self.level_source = Some(source);
@@ -880,6 +887,46 @@ mod tests {
             assert!(b > 0.0 && b <= 1.0, "bar out of range: {b}");
         }
         assert!(o.bars.iter().all(|b| *b < 0.35), "silence should stay low");
+    }
+
+    /// The bug this guards against: the meter looked identical whether or not
+    /// anyone was speaking, because a raw microphone peak of 0.1 mapped to a
+    /// bar height below the minimum and every bar sat pinned at its floor.
+    #[test]
+    fn ordinary_speech_lifts_the_bars_well_clear_of_silence() {
+        let quiet = settled_peak(0.0);
+        // A laptop microphone at a normal speaking distance.
+        let speech = settled_peak(0.10);
+        let loud = settled_peak(0.30);
+
+        assert!(quiet < 0.15, "silence should sit low, got {quiet}");
+        assert!(
+            speech > quiet * 3.0,
+            "speech at 0.10 must clearly beat silence: {speech} against {quiet}"
+        );
+        assert!(
+            speech > 0.4,
+            "speech at 0.10 must use a real part of the meter, got {speech}"
+        );
+        assert!(loud > speech, "louder must read taller: {loud} against {speech}");
+    }
+
+    /// Drives the animation to a steady state at a given microphone peak and
+    /// returns the tallest bar, which is what the eye reads.
+    fn settled_peak(peak: f32) -> f32 {
+        let mut o = Overlay::disabled();
+        for _ in 0..60 {
+            o.set_level(peak);
+            o.advance();
+        }
+        let mut tallest: f32 = 0.0;
+        // Over a full cycle of the travelling wave, not one arbitrary frame.
+        for _ in 0..40 {
+            o.set_level(peak);
+            o.advance();
+            tallest = tallest.max(o.bars.iter().cloned().fold(0.0f32, f32::max));
+        }
+        tallest
     }
 
     #[test]
