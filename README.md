@@ -1,7 +1,9 @@
 # Flow
 
-Dictation that runs on your own machine. Hold a key, talk, let go, and the text
-is in whatever you were typing into.
+An unapologetic alternative to cloud dictation. Ultra light, heavily optimised,
+and your voice never leaves the machine.
+
+Hold a key, talk, let go. The text is in whatever you were typing into.
 
 <p align="center">
   <img src="docs/images/overlay.png" alt="The Flow overlay: a recording dot, a live waveform, and the words as they are recognised" width="616">
@@ -20,9 +22,17 @@ does the recognition here, on the CPU you already own. There is no account, no
 upload, no subscription, and no network traffic of any kind while you dictate.
 Pull the ethernet cable out and it behaves the same.
 
-Local recognition has a reputation for being slow. On a mid-range laptop the
-wait between releasing the key and seeing the text is around a third of a
-second.
+Fast and light are measurable, so they are measured. On a 15 watt laptop chip:
+
+- **221 ms** from releasing the key to text on screen, on the fast model
+- **0.0%** idle CPU, and one inference thread while working
+- **19 MB** installer, **220 MB** resident with the speech model held in memory
+- **2 to 4 ms** from the hotkey to a running microphone
+- No browser engine, no UI toolkit, no background service, no telemetry
+
+Local recognition has a reputation for being slow. That reputation comes from
+running an offline model the way an online one is written, and most of the
+engineering here went into the difference.
 
 ## Installing
 
@@ -57,8 +67,9 @@ they arrive as punctuation. Sentences are capitalised for you.
 
 ## Speed
 
-Measured on a Ryzen 7 7735U, a 15 watt laptop chip from 2022, while OneDrive was
-using most of a core in the background.
+Every number below is reproducible with a command in this repository. Measured
+on a Ryzen 7 7735U, a 15 watt laptop chip from 2022, while OneDrive was using
+most of a core in the background, so the quiet-machine figures are better.
 
 | | Small model | Tiny model |
 |---|---:|---:|
