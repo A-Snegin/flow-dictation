@@ -124,20 +124,27 @@ fn main() {
     // the microphone is actually hearing something, which is the whole point
     // of the pill: knowing the words are not being wasted.
     let level = Arc::new(AtomicU32::new(0));
+    // Same peaks, but never cleared by the overlay: this one is read once per
+    // utterance and written to the trace, so a meter that does not move can be
+    // told apart from a microphone that heard nothing.
+    let peak_seen = Arc::new(AtomicU32::new(0));
     let capture_thread = {
         let sink = sink.clone();
         let first = Arc::clone(&first_packet);
         let level = Arc::clone(&level);
+        let peak_seen = Arc::clone(&peak_seen);
         std::thread::spawn(move || {
             Capture::open(move |samples| {
                 if first.load(Ordering::Relaxed) == 0 {
                     first.store(trace::now(), Ordering::Relaxed);
                 }
                 let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+                let milli = (peak * 1000.0) as u32;
                 // fetch_max, not store: packets arrive every 10 ms and the
                 // overlay looks every 40 ms, so a plain store threw away three
                 // packets in four and could miss the loudest one entirely.
-                level.fetch_max((peak * 1000.0) as u32, Ordering::Relaxed);
+                level.fetch_max(milli, Ordering::Relaxed);
+                peak_seen.fetch_max(milli, Ordering::Relaxed);
                 sink.push(samples);
             })
         })
@@ -242,6 +249,7 @@ fn main() {
         enabled: true,
         first_packet,
         level,
+        peak_seen,
         overlay,
     };
 
@@ -279,9 +287,20 @@ fn main() {
             }
             Some(TrayCommand::LatencyReport) => println!("\n{}\n", trace::report()),
             Some(TrayCommand::OpenSettings) => {
-                let _ = std::process::Command::new("cmd")
-                    .args(["/C", "start", "", &Settings::path().to_string_lossy()])
-                    .spawn();
+                // Notepad by name, not the shell's file association. Nothing
+                // owns .toml on a stock Windows install, so handing it to
+                // "start" produces the "how do you want to open this file"
+                // picker rather than the settings.
+                let path = Settings::path();
+                if std::process::Command::new("notepad.exe")
+                    .arg(path.as_os_str())
+                    .spawn()
+                    .is_err()
+                {
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", &path.to_string_lossy()])
+                        .spawn();
+                }
             }
             Some(TrayCommand::ToggleAutostart) => match flow::autostart::toggle() {
                 Ok(on) => println!(
@@ -334,8 +353,11 @@ struct App {
     utterance: Option<Utterance>,
     enabled: bool,
     first_packet: Arc<AtomicI64>,
-    /// Peak microphone level in thousandths, written by the capture thread.
+    /// Peak microphone level in thousandths, written by the capture thread and
+    /// cleared by the overlay each frame.
     level: Arc<AtomicU32>,
+    /// The same peaks, cleared once per utterance for the trace.
+    peak_seen: Arc<AtomicU32>,
     overlay: Overlay,
 }
 
@@ -364,6 +386,7 @@ impl App {
         // speech the user has already said and the recogniser will never see.
         self.first_packet.store(0, Ordering::SeqCst);
         self.level.store(0, Ordering::Relaxed);
+        self.peak_seen.store(0, Ordering::Relaxed);
         self.asr.begin();
 
         match self.capture.as_ref() {
@@ -391,6 +414,7 @@ impl App {
         };
         u.t7_hotkey_up = trace::now();
         u.t1_first_packet = self.first_packet.load(Ordering::SeqCst);
+        u.peak_level = self.peak_seen.swap(0, Ordering::Relaxed) as f32 / 1000.0;
         self.asr.release();
         self.overlay.set(OverlayState::Finalising, "");
         // Stopping is a flag and an event: it does not join the capture thread,

@@ -99,7 +99,7 @@ const COL_TEXT_LIVE: COLORREF = COLORREF(0x00_D6_D6_D6);
 const COL_HINT: COLORREF = COLORREF(0x00_8E_8E_8E);
 const COL_KEYCAP: COLORREF = COLORREF(0x00_36_38_3A);
 const COL_KEYCAP_TEXT: COLORREF = COLORREF(0x00_D8_D8_D8);
-const COL_WAVE: COLORREF = COLORREF(0x00_9A_9A_9A);
+const COL_WAVE: COLORREF = COLORREF(0x00_BC_BC_BC);
 /// The background again, in BGR byte order, for the pixel passes.
 const BG_BYTES: [u8; 3] = [0x1E, 0x1D, 0x1C];
 
@@ -404,16 +404,20 @@ impl Overlay {
         }
 
         // ---- waveform ------------------------------------------------------
-        let bar_w = px(2.0).max(2);
+        let bar_w = px(3.0).max(2);
         let bar_gap = px(3.0).max(2);
         let wave_left = pad + dot_r * 2 + px(13.0);
         let wave_w = bar_w * BARS as i32 + bar_gap * (BARS as i32 - 1);
         if live {
-            let max_h = px(19.0);
-            // A floor tall enough to see. RoundRect on a rectangle only a
-            // couple of pixels across degenerates to nothing at all, so short
-            // bars are filled rectangles and only tall ones get rounded ends.
-            let min_h = px(4.0).max(3);
+            // Nearly the full height of the pill. The meter is the only part
+            // that answers "is it hearing me", so it is worth the room, and a
+            // low floor makes the difference between silence and speech large
+            // enough to catch out of the corner of an eye.
+            let max_h = px(26.0);
+            // RoundRect on a rectangle only a couple of pixels across
+            // degenerates to nothing at all, so short bars are filled
+            // rectangles and only tall ones get rounded ends.
+            let min_h = px(3.0).max(2);
             for i in 0..BARS {
                 let value = self.bars[i].clamp(0.0, 1.0);
                 let bar_h = ((max_h as f32) * value).round().max(min_h as f32) as i32;
@@ -421,7 +425,7 @@ impl Overlay {
                 let top = h / 2 - bar_h / 2;
                 // Taller bars brighter, so the trace has depth instead of
                 // being a row of identical marks.
-                let colour = dim(COL_WAVE, 0.55 + 0.45 * value);
+                let colour = dim(COL_WAVE, 0.42 + 0.58 * value);
                 unsafe {
                     let brush = CreateSolidBrush(colour);
                     if bar_h > bar_w * 3 {

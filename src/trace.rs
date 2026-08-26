@@ -56,6 +56,10 @@ pub struct Utterance {
     /// thread: resetting the stream and starting it.
     pub reset_us: u32,
     pub start_us: u32,
+    /// Loudest sample the microphone delivered during this utterance, 0..1.
+    /// Near zero with text in the transcript would mean the level plumbing is
+    /// broken rather than the microphone.
+    pub peak_level: f32,
 }
 
 impl Utterance {
@@ -101,7 +105,7 @@ impl Utterance {
             "{{\"user_perceived_ms\":{:.1},\"activation_ms\":{:.1},\"arm_ms\":{:.1},\
              \"finalisation_ms\":{:.1},\
              \"insertion_ms\":{:.1},\"first_partial_ms\":{:.1},\"chars\":{},\
-             \"reset_us\":{},\"start_us\":{}}}",
+             \"reset_us\":{},\"start_us\":{},\"peak_level\":{:.3}}}",
             self.user_perceived_ms(),
             self.activation_ms(),
             self.arm_ms(),
@@ -110,7 +114,8 @@ impl Utterance {
             self.first_partial_ms(),
             self.chars,
             self.reset_us,
-            self.start_us
+            self.start_us,
+            self.peak_level
         )
     }
 }
