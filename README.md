@@ -47,6 +47,26 @@ insert-test.exe                # clipboard round trip, unicode, save and restore
 bench-e2e.exe --holds 24       # key-up to transcript, percentiles
 ```
 
+## The pill
+
+The only thing Flow draws. A fixed-size rounded bar, low on the screen, click
+through, and never focusable: if it took focus the caret would leave your
+document and the text would land in the wrong place.
+
+It answers four questions and nothing else. A lightning bolt in the accent
+colour says which state it is in. A five-bar meter moves with your voice, so
+you can see the microphone is hearing you rather than guess. The live text
+follows the tail of what you are saying, with the left edge fading into the
+background, so you always read your most recent words instead of your first
+ones. When the text lands it says so for a second, then disappears.
+
+It never resizes. A shape that grows and shrinks as words arrive is movement at
+the edge of vision, which is the opposite of unobtrusive.
+
+Costs: fonts, the memory DC and the bitmap are built once and reused, the whole
+thing repaints at 25 fps and only while it is on screen, and idle CPU with Flow
+resident measures 0.000 percent.
+
 ## Terminals
 
 Dictating into PowerShell, cmd or Windows Terminal is handled separately from

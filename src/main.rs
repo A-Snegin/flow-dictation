@@ -5,7 +5,7 @@
 //! and inference each own a thread. Nothing on the path from key-up to text
 //! touches the disk, the network, or a browser engine.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -33,6 +33,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const WM_FLOW_WAKE: u32 = 0x0400 + 2;
 
 fn main() {
+    // Before any window exists: otherwise the overlay is drawn at 96 dpi and
+    // scaled up by the compositor, which looks soft on a scaled display.
+    unsafe {
+        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--mic-test") => {
@@ -101,14 +109,21 @@ fn main() {
     // before either, which is what lets the device start filling it.
     let sink = AudioSink::new();
     let first_packet = Arc::new(AtomicI64::new(0));
+    // Peak level per packet, in thousandths. The overlay reads it to show that
+    // the microphone is actually hearing something, which is the whole point
+    // of the pill: knowing the words are not being wasted.
+    let level = Arc::new(AtomicU32::new(0));
     let capture_thread = {
         let sink = sink.clone();
         let first = Arc::clone(&first_packet);
+        let level = Arc::clone(&level);
         std::thread::spawn(move || {
             Capture::open(move |samples| {
                 if first.load(Ordering::Relaxed) == 0 {
                     first.store(trace::now(), Ordering::Relaxed);
                 }
+                let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+                level.store((peak * 1000.0) as u32, Ordering::Relaxed);
                 sink.push(samples);
             })
         })
@@ -206,6 +221,7 @@ fn main() {
         utterance: None,
         enabled: true,
         first_packet,
+        level,
         overlay,
     };
 
@@ -215,8 +231,18 @@ fn main() {
     // the hook or the ASR worker. The 250 ms timeout is only a safety net.
     let mut msg = MSG::default();
     loop {
+        // While the pill is up, wake often enough to animate the meter.
+        // Otherwise sleep until something actually happens.
+        app.overlay
+            .set_level(app.level.load(Ordering::Relaxed) as f32 / 1000.0);
+        let wait = app
+            .overlay
+            .tick()
+            .map(|d| d.as_millis() as u32)
+            .unwrap_or(u32::MAX);
+
         unsafe {
-            MsgWaitForMultipleObjectsEx(None, 250, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            MsgWaitForMultipleObjectsEx(None, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -289,6 +315,8 @@ struct App {
     utterance: Option<Utterance>,
     enabled: bool,
     first_packet: Arc<AtomicI64>,
+    /// Peak microphone level in thousandths, written by the capture thread.
+    level: Arc<AtomicU32>,
     overlay: Overlay,
 }
 
@@ -313,6 +341,7 @@ impl App {
         self.overlay.set(OverlayState::Listening, "");
 
         self.first_packet.store(0, Ordering::SeqCst);
+        self.level.store(0, Ordering::Relaxed);
         self.asr.begin();
 
         match self.capture.as_ref() {
@@ -381,7 +410,7 @@ impl App {
 
                     if formatted.trim().is_empty() {
                         u.t12_inserted = trace::now();
-                        self.overlay.set(OverlayState::Hidden, "");
+                        self.overlay.set(OverlayState::Error, "nothing heard");
                     } else {
                         // Decide per target: a shell prompt is not a document.
                         let exe = target_app::foreground_executable();
@@ -405,7 +434,9 @@ impl App {
                             self.overlay.set(OverlayState::Error, &e);
                         }
                         u.t12_inserted = trace::now();
-                        self.overlay.set(OverlayState::Hidden, "");
+                        // Painted after the text is already in the target
+                        // application, so it costs the user nothing.
+                        self.overlay.set(OverlayState::Done, formatted.trim());
                         println!(
                             "{:>6.0} ms  {}",
                             u.user_perceived_ms(),
