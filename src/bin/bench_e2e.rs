@@ -120,7 +120,7 @@ fn main() {
         Config {
             partial_cadence: Duration::from_millis(args.cadence_ms),
             force_partials: args.force,
-            min_stream_secs: 0.0,
+            release_tail: Duration::from_millis(15),
         },
     );
 

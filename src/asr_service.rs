@@ -38,17 +38,19 @@ pub struct Config {
     /// 200 ms of new audio unless `force` is set.
     pub partial_cadence: Duration,
     pub force_partials: bool,
-    /// Below this, run the non-streaming path instead: for very short holds it
-    /// beats paying stream setup.
-    pub min_stream_secs: f64,
+    /// How long to keep collecting after key-up before ending the stream.
+    /// WASAPI delivers on the device period, so the last few milliseconds of
+    /// speech are still in flight when the key comes up. Cheap insurance
+    /// against a clipped final consonant.
+    pub release_tail: Duration,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            partial_cadence: Duration::from_millis(100),
-            force_partials: true,
-            min_stream_secs: 0.0,
+            partial_cadence: Duration::from_millis(250),
+            force_partials: false,
+            release_tail: Duration::from_millis(15),
         }
     }
 }
@@ -129,6 +131,14 @@ impl AsrService {
         }
     }
 
+    /// A handle the capture thread can own. The service itself holds an mpsc
+    /// Receiver and so is not Sync; the audio path needs neither.
+    pub fn audio_sink(&self) -> AudioSink {
+        AudioSink {
+            staging: Arc::clone(&self.staging),
+        }
+    }
+
     /// Hotkey up. Sets the flag first so the worker refuses to start another
     /// partial even before it drains the command queue.
     pub fn release(&self) {
@@ -137,6 +147,27 @@ impl AsrService {
         }
         self.release_pending.store(true, Ordering::SeqCst);
         let _ = self.cmd.send(Cmd::Release);
+    }
+}
+
+/// Write-only handle to the ASR worker's input buffer.
+#[derive(Clone)]
+pub struct AudioSink {
+    staging: Arc<Mutex<Staging>>,
+}
+
+impl AudioSink {
+    pub fn push(&self, samples: &[f32]) {
+        if let Ok(mut s) = self.staging.lock() {
+            s.buf.extend_from_slice(samples);
+        }
+    }
+
+    /// Drops anything captured but not yet consumed, for a cancelled utterance.
+    pub fn clear(&self) {
+        if let Ok(mut s) = self.staging.lock() {
+            s.buf.clear();
+        }
     }
 }
 
@@ -239,6 +270,13 @@ fn worker_loop(
 
         let t_drain = Instant::now();
         drain_into_stream(&staging, &mut spare, &stream, SR, &ev_tx);
+        // Let the last device packet land before ending input.
+        let tail_deadline = released_at + config.release_tail;
+        let now = Instant::now();
+        if tail_deadline > now {
+            std::thread::sleep(tail_deadline - now);
+            drain_into_stream(&staging, &mut spare, &stream, SR, &ev_tx);
+        }
         let final_lines = match stream.stop().and_then(|_| stream.transcribe(false)) {
             Ok(l) => l,
             Err(e) => {
