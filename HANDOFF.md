@@ -6,7 +6,7 @@ cursor. Built 26 Aug 2026, shipped public the same day.
 ## Done
 
 **v1.0.0 is public and installable.** <https://github.com/A-Snegin/flow-dictation>,
-MIT, `main`, 28 commits, 28 tests passing.
+MIT, `main`, 28 tests passing.
 
 - Rust core linking the prebuilt Moonshine v2 streaming C library through
   hand-written FFI (`src/ffi.rs`, `src/asr.rs`). No ONNX export work needed:
