@@ -238,6 +238,13 @@ fn main() {
                     .args(["/C", "start", "", &Settings::path().to_string_lossy()])
                     .spawn();
             }
+            Some(TrayCommand::ToggleAutostart) => match flow::autostart::toggle() {
+                Ok(on) => println!(
+                    "Start at login is now {}",
+                    if on { "on" } else { "off" }
+                ),
+                Err(e) => eprintln!("could not change autostart: {e}"),
+            },
             Some(TrayCommand::ReloadDictionary) => {
                 // Dictionary, formatting and insertion reload live. The hotkey
                 // and the model do not: one is hooked, the other is a warmed

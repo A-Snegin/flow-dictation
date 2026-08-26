@@ -3,6 +3,7 @@
 pub mod asr;
 pub mod asr_service;
 pub mod audio;
+pub mod autostart;
 pub mod ffi;
 pub mod format;
 pub mod hotkey;

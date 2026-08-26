@@ -27,6 +27,7 @@ pub enum TrayCommand {
     LatencyReport,
     OpenSettings,
     ReloadDictionary,
+    ToggleAutostart,
     Quit,
 }
 
@@ -35,7 +36,8 @@ const ID_TOGGLE: usize = 1;
 const ID_REPORT: usize = 2;
 const ID_SETTINGS: usize = 3;
 const ID_RELOAD: usize = 4;
-const ID_QUIT: usize = 5;
+const ID_AUTOSTART: usize = 5;
+const ID_QUIT: usize = 6;
 
 static SENDER: OnceLock<Mutex<Sender<TrayCommand>>> = OnceLock::new();
 static CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -167,6 +169,12 @@ unsafe fn show_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, ID_REPORT, w!("Latency report"));
         let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Open settings"));
         let _ = AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("Reload dictionary"));
+        let autostart_label = if crate::autostart::is_enabled() {
+            w!("Start at login: on")
+        } else {
+            w!("Start at login: off")
+        };
+        let _ = AppendMenuW(menu, MF_STRING, ID_AUTOSTART, autostart_label);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, w!("Quit Flow"));
 
@@ -191,6 +199,7 @@ unsafe fn show_menu(hwnd: HWND) {
             ID_REPORT => Some(TrayCommand::LatencyReport),
             ID_SETTINGS => Some(TrayCommand::OpenSettings),
             ID_RELOAD => Some(TrayCommand::ReloadDictionary),
+            ID_AUTOSTART => Some(TrayCommand::ToggleAutostart),
             ID_QUIT => Some(TrayCommand::Quit),
             _ => None,
         };

@@ -300,7 +300,14 @@ fn worker_loop(
                     break;
                 }
                 Ok(Cmd::Shutdown) => return,
-                Ok(Cmd::Begin) | Ok(Cmd::SetKeyterms(_)) => {}
+                Ok(Cmd::SetKeyterms(terms)) => {
+                    // Arrived mid-utterance. Apply it rather than drop it; the
+                    // library replaces the trie without disturbing the stream.
+                    if let Err(e) = transcriber.set_keyterms(&terms) {
+                        let _ = ev_tx.send(Event::Error(format!("keyterms rejected: {e}")));
+                    }
+                }
+                Ok(Cmd::Begin) => {}
                 Err(_) => {}
             }
 
