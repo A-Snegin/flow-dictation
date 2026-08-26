@@ -27,9 +27,11 @@ from your voice to the text, and nothing is uploaded, ever.
 .\scripts\fetch-model.ps1 -Model tiny     # optional, the fast profile
 
 cargo build --release
+.\scripts\install.ps1                   # copies the binaries to a fixed path, adds them
+                                      # to your PATH, writes a Desktop launcher
 ```
 
-Then run `flow-core.exe`. It loads the model, warms it, installs the hotkey and
+Then run `flow-core`, or use the Desktop launcher. It loads the model, warms it, installs the hotkey and
 sits in the notification area. Hold Right Ctrl, speak, let go.
 
 Build outputs and models live in `%LOCALAPPDATA%\Flow`. Settings live in
