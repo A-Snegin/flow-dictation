@@ -55,6 +55,43 @@ administrator rights.
 The installer is not code signed, so Windows shows "Windows protected your PC".
 Choose More info, then Run anyway.
 
+## Linux
+
+Flow also runs on Hyprland, and on any Wayland compositor that speaks
+wlr-layer-shell for the overlay. You need PipeWire, `wtype` and `wl-clipboard`
+on the system already; Rust 1.90 to build.
+
+```bash
+scripts/fetch-runtime.sh     # Moonshine runtime into ~/.local/share/flow/moonshine
+scripts/fetch-model.sh       # small-streaming-en into ~/.local/share/flow/models
+scripts/install-linux.sh     # builds, installs flow-core, writes the systemd unit
+```
+
+`install-linux.sh` does not bind the hotkey or start the service; it prints
+two lines to add to `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("CONTROL_R", "Flow: hold to dictate", "flow-core --key down")
+o.bind("CTRL + CONTROL_R", "Flow: release", "flow-core --key up", { release = true })
+```
+
+Reload Hyprland's config, then `systemctl --user enable --now flow.service`.
+
+There is no tray on Linux. `flow-core --ctl toggle|cancel|reload|report|quit`
+does what the tray menu does on Windows, over a control socket the running
+`flow-core` already listens on.
+
+Settings live at `~/.config/flow/settings.toml`, the model and traces at
+`~/.local/share/flow`. Both paths follow `XDG_CONFIG_HOME` and
+`XDG_DATA_HOME` when set.
+
+Insertion defaults to Type (`wtype`), which never touches the clipboard.
+Setting `insertion.mode = "paste"` puts the text on the clipboard for a
+moment before sending Ctrl+V; a clipboard history tool such as cliphist will
+see it, since nothing on Linux has an equivalent of the Windows
+"exclude from clipboard history" flags. Type mode avoids that entirely and is
+what terminals use regardless of the setting.
+
 ## Using it
 
 Hold **Right Ctrl**, speak, and let go. The words go in at the cursor, in any
