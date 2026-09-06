@@ -105,7 +105,10 @@ impl Default for Model {
 impl Default for Insertion {
     fn default() -> Self {
         Insertion {
-            mode: "paste".into(),
+            // Paste is flat in length on Windows. On Wayland the paste path
+            // goes through the clipboard daemon and any clipboard manager sees
+            // the dictation, so typing through wtype is the default there.
+            mode: if cfg!(windows) { "paste" } else { "type" }.into(),
             terminal_mode: "type".into(),
             terminal_apps: Vec::new(),
             terminal_newline_replacement: " ".into(),
@@ -187,14 +190,17 @@ impl Settings {
         let body = toml::to_string_pretty(self).unwrap_or_default();
         let commented = format!(
             "# Flow settings.\n\
-             # Dictionary and formatting changes apply from the tray: Reload dictionary.\n\
-             # Hotkey and model changes need Flow restarted.\n\
+             # Every change here applies live: the file is watched while Flow runs.\n\
+             # Windows: %APPDATA%\\Flow\\settings.toml. Linux: ~/.config/flow/settings.toml.\n\
              #\n\
              # hotkey.key            rightctrl | rightalt | rightshift | f13 | capslock | leftctrl\n\
+             #                       (Linux: the key is bound in the compositor and delivered to\n\
+             #                       Flow over its control socket, so this only labels the pill)\n\
              # model.profile         fast (tiny, about twice as quick) | balanced (small)\n\
              # model.single_thread   true is both faster at the tail and far lighter on CPU\n\
-             # insertion.mode        paste (default, flat cost) | type (for apps that block paste)\n\
-             # insertion.terminal_mode  how to insert into PowerShell, cmd, Windows Terminal and\n\
+             # insertion.mode        paste (Windows default, flat cost) | type (Linux default;\n\
+             #                       on Wayland typing goes through wtype and paste through wl-copy)\n\
+             # insertion.terminal_mode  how to insert into PowerShell, cmd, Windows Terminal, alacritty and\n\
              #                       friends. Typing is the default there, and line breaks are\n\
              #                       replaced with a space so a dictation can never run a command.\n\
              #\n\
