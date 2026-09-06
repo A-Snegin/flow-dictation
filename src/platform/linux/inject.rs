@@ -98,8 +98,11 @@ fn paste(text: &str) -> Result<(), String> {
 /// Unicode keystrokes via wtype, text piped over stdin so it never touches
 /// argv (no `ps` leak, no shell history entry).
 fn type_text(text: &str) -> Result<(), String> {
+    // wtype sleeps between keystrokes unless told not to: 60 characters cost
+    // 275 ms with the default delay and 2 ms with none. Nothing we type needs
+    // the pause; the compositor delivers the events in order regardless.
     let mut child = Command::new("wtype")
-        .arg("-")
+        .args(["-d", "0", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
