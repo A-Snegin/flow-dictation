@@ -13,12 +13,13 @@ config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 bin_dir="$HOME/.local/bin"
 unit_dir="$config_home/systemd/user"
 
-echo "Building flow-core (release) ..."
+echo "Building flow-core and flow-ctl (release) ..."
 (cd "$repo_root" && cargo build --release)
 
 mkdir -p "$bin_dir"
 install -m 755 "$repo_root/target/release/flow-core" "$bin_dir/flow-core"
-echo "Installed $bin_dir/flow-core"
+install -m 755 "$repo_root/target/release/flow-ctl" "$bin_dir/flow-ctl"
+echo "Installed $bin_dir/flow-core and $bin_dir/flow-ctl"
 
 mkdir -p "$unit_dir"
 unit_file="$unit_dir/flow.service"
@@ -45,8 +46,8 @@ cat <<'EOF'
 Not done yet: add these two lines to ~/.config/hypr/bindings.lua, replacing
 any existing Right Ctrl binding (voxtype's, if that is what is bound there):
 
-  o.bind("CONTROL_R", "Flow: hold to dictate", "flow-core --key down")
-  o.bind("CTRL + CONTROL_R", "Flow: release", "flow-core --key up", { release = true })
+  o.bind("CONTROL_R", "Flow: hold to dictate", "flow-ctl down")
+  o.bind("CTRL + CONTROL_R", "Flow: release", "flow-ctl up", { release = true })
 
 Then reload Hyprland's config and start the service yourself:
 

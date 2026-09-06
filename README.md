@@ -71,15 +71,21 @@ scripts/install-linux.sh     # builds, installs flow-core, writes the systemd un
 two lines to add to `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("CONTROL_R", "Flow: hold to dictate", "flow-core --key down")
-o.bind("CTRL + CONTROL_R", "Flow: release", "flow-core --key up", { release = true })
+o.bind("CONTROL_R", "Flow: hold to dictate", "flow-ctl down")
+o.bind("CTRL + CONTROL_R", "Flow: release", "flow-ctl up", { release = true })
 ```
 
 Reload Hyprland's config, then `systemctl --user enable --now flow.service`.
 
-There is no tray on Linux. `flow-core --ctl toggle|cancel|reload|report|quit`
-does what the tray menu does on Windows, over a control socket the running
-`flow-core` already listens on.
+`flow-ctl` is a second, tiny binary just for this: it writes one line to
+flow-core's control socket and exits, without linking Moonshine or ONNX
+Runtime, so the round trip from a keypress is about 1.5 ms rather than the
+4 ms `flow-core` itself would cost to map those libraries on every press.
+
+There is no tray on Linux. `flow-ctl toggle|cancel|reload|report|quit` does
+what the tray menu does on Windows, over the same control socket. `flow-core
+--key <cmd>` does the same job and needs nothing but flow-core itself, so
+it is the fallback if `flow-ctl` is not installed.
 
 Settings live at `~/.config/flow/settings.toml`, the model and traces at
 `~/.local/share/flow`. Both paths follow `XDG_CONFIG_HOME` and
