@@ -1,7 +1,43 @@
 # Flow handoff
 
-Local dictation for Windows. Hold Right Ctrl, talk, let go, text lands at the
-cursor. Built 26 Aug 2026, shipped public the same day.
+Local dictation for Windows and Linux. Hold Right Ctrl, talk, let go, text
+lands at the cursor. Built 26 Aug 2026, shipped public the same day. Linux port
+on branch `linux`, 6 Sep 2026.
+
+## Linux port (branch `linux`, 6 Sep 2026)
+
+One crate, one binary, platform code split under `src/platform/{windows,linux}`
+with the same module surface on both. Shared code moved out of the Windows
+files: `audio_convert.rs` (resampler), `overlay_model.rs` (pill state machine,
+geometry, animation), `control.rs` (HotkeyEvent), `platform/*/sys.rs` (waker,
+priority, clock). `main.rs` is platform neutral: the Windows message pump and
+tray stay under `cfg(windows)`; Linux blocks on an eventfd.
+
+- Audio: PipeWire stream connected at startup, inactive; `arm()` is a graph
+  state change. Measured: arm 0.01 ms, first sample 15 ms after arm, 16 kHz
+  mono negotiated so the resampler is bypassed.
+- Hotkey: Hyprland binds bare `CONTROL_R` (press) and `CTRL + CONTROL_R` with
+  release to `flow-ctl down|up`, a std-only client that talks to
+  `$XDG_RUNTIME_DIR/flow/control.sock`. `flow-ctl toggle|cancel|reload|report|quit`
+  replaces the tray. No evdev, no input group.
+- Overlay: wlr-layer-shell surface via smithay-client-toolkit, drawn with
+  tiny-skia and ab_glyph, no toolkit. Pixel geometry matches the Windows GDI
+  code; `docs/images/overlay.png` predates the current code on both platforms.
+- Insertion: `wtype -d 0 -` for type mode (60 chars in 2 ms), wl-copy/wl-paste
+  for paste mode. Type is the Linux default; terminals detected by Hyprland
+  window class.
+- Runtime: Moonshine Linux bundle is one `libmoonshine.so` plus
+  `libonnxruntime.so.1`, linked with an rpath, at `~/.local/share/flow/moonshine`.
+  Scripts: `scripts/fetch-runtime.sh`, `scripts/fetch-model.sh`,
+  `scripts/install-linux.sh` (systemd user unit `flow.service`).
+- Measured on the Ryzen 7 7735U under Omarchy: ready in 150 ms, 220 MB
+  resident, key-up to text 582 ms on the small model via a WAV through a null
+  sink (no human spoke during the autonomous build).
+
+Open on Linux: regenerate `docs/images/overlay.png`; verify the Windows build
+still compiles after the split (only reviewed, not built); consider an
+in-process virtual keyboard only if `insertion_ms` in traces warrants it;
+merge `linux` into `main` once Anton has used it for a few days.
 
 ## Done
 
