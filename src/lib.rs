@@ -6,6 +6,7 @@ pub mod audio_convert;
 pub mod control;
 pub mod ffi;
 pub mod format;
+pub mod overlay_model;
 pub mod platform;
 pub mod settings;
 pub mod stats;

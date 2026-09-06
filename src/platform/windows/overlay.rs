@@ -1,4 +1,4 @@
-//! The floating status pill: the only thing Flow puts on screen.
+//! The floating status pill on Windows: the only thing Flow puts on screen.
 //!
 //! A slim black bar low on the screen. Left to right: a recording dot, a live
 //! waveform, the words as they are recognised with a caret at the end, and a
@@ -9,6 +9,10 @@
 //!   2. Is my voice actually reaching it? (a live trace, not a static dot)
 //!   3. Am I seeing what I just said, rather than what I said first?
 //!   4. Did the text land, or did I lose a sentence?
+//!
+//! What it is made of, how it animates and when it goes away all live in
+//! `crate::overlay_model`, shared with the Wayland version. This file is only
+//! the Win32 part: a window and a bitmap.
 //!
 //! Drawn with GDI into a 32-bit DIB and pushed with `UpdateLayeredWindow`.
 //! Not Direct2D: this is a rounded rectangle, some bars and a line of text,
@@ -39,7 +43,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
@@ -60,73 +64,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum OverlayState {
-    Hidden,
-    /// Key is down, audio is being captured.
-    Listening,
-    /// Key released, the recogniser is finishing.
-    Finalising,
-    /// Text went into the target application. Shown briefly, then gone.
-    Done,
-    Error,
-}
+use crate::overlay_model as model;
+use crate::overlay_model::{OverlayModel, Tick, BARS};
 
-const DONE_LINGER: Duration = Duration::from_millis(1000);
-const ERROR_LINGER: Duration = Duration::from_millis(3000);
-/// 25 fps: fluid enough to read as live, cheap enough not to matter, and only
-/// ever running while the pill is on screen.
-pub const LISTENING_TICK: Duration = Duration::from_millis(40);
+pub use crate::overlay_model::{OverlayState, LISTENING_TICK};
 
-/// Bars in the waveform. Thin and many, so it reads as a voice trace rather
-/// than a level meter.
-const BARS: usize = 11;
-
-/// Fixed per-bar weights. A flat envelope looks synthetic; this gives the trace
-/// the uneven shape a real waveform has, while staying identical frame to frame
-/// so only the level and the travelling wave move.
-const BAR_WEIGHT: [f32; BARS] = [
-    0.42, 0.68, 0.50, 0.88, 0.60, 1.00, 0.55, 0.92, 0.48, 0.72, 0.40,
+/// The pill background in the byte order a 32-bit DIB uses, for the pixel pass.
+const BG_BYTES: [u8; 3] = [
+    model::COL_BG[2],
+    model::COL_BG[1],
+    model::COL_BG[0],
 ];
-
-// COLORREF is 0x00BBGGRR.
-const COL_BG: COLORREF = COLORREF(0x00_1C_1D_1E);
-const COL_ACCENT: COLORREF = COLORREF(0x00_3C_60_F0); // coral
-const COL_DONE: COLORREF = COLORREF(0x00_6A_C4_57);
-const COL_ERROR: COLORREF = COLORREF(0x00_4D_48_E5);
-const COL_TEXT: COLORREF = COLORREF(0x00_F2_F2_F2);
-const COL_TEXT_LIVE: COLORREF = COLORREF(0x00_D6_D6_D6);
-const COL_HINT: COLORREF = COLORREF(0x00_8E_8E_8E);
-const COL_KEYCAP: COLORREF = COLORREF(0x00_36_38_3A);
-const COL_KEYCAP_TEXT: COLORREF = COLORREF(0x00_D8_D8_D8);
-const COL_WAVE: COLORREF = COLORREF(0x00_BC_BC_BC);
-/// The background again, in BGR byte order, for the pixel passes.
-const BG_BYTES: [u8; 3] = [0x1E, 0x1D, 0x1C];
 
 pub struct Overlay {
     hwnd: Option<HWND>,
-    state: OverlayState,
-    text: String,
-    /// Smoothed 0..1 microphone level.
-    level: f32,
-    /// Per-bar heights, each chasing the level with its own lag so the trace
-    /// undulates instead of moving as one block.
-    bars: [f32; BARS],
-    /// Advances every tick and drives the travelling wave through the bars.
-    phase: f32,
-    shown_at: Instant,
+    m: OverlayModel,
     visible: bool,
-    /// Which key the user is holding, drawn on the right as a reminder.
-    hint_key: String,
-    /// Peak level since the last frame, in thousandths, written by the capture
-    /// thread. Read and cleared once per animation step: sampling it from the
-    /// message loop instead meant reading it several times between frames, and
-    /// every read after the first saw zero and pulled the meter down.
-    level_source: Option<Arc<AtomicU32>>,
     scale: f32,
-    /// Fixed. The pill never resizes: a shape that grows and shrinks as words
-    /// arrive is movement at the edge of vision, which is the opposite of what
-    /// an unobtrusive indicator should be. Long sentences scroll inside it.
+    /// Device pixels. The pill never resizes; see `overlay_model`.
     width: i32,
     height: i32,
     gdi: Option<Gdi>,
@@ -154,15 +109,8 @@ impl Overlay {
     pub fn disabled() -> Overlay {
         Overlay {
             hwnd: None,
-            state: OverlayState::Hidden,
-            text: String::new(),
-            level: 0.0,
-            bars: [0.0; BARS],
-            phase: 0.0,
-            shown_at: Instant::now(),
+            m: OverlayModel::new("Ctrl"),
             visible: false,
-            hint_key: "Ctrl".into(),
-            level_source: None,
             scale: 1.0,
             width: 0,
             height: 0,
@@ -174,8 +122,8 @@ impl Overlay {
         unsafe {
             let dpi = GetDpiForSystem();
             let scale = (dpi as f32 / 96.0).clamp(1.0, 3.0);
-            let width = (560.0 * scale) as i32;
-            let height = (44.0 * scale) as i32;
+            let width = (model::WIDTH * scale) as i32;
+            let height = (model::HEIGHT * scale) as i32;
 
             let instance = GetModuleHandleW(None).map_err(|e| e.to_string())?;
             if !CLASS_REGISTERED.swap(true, Ordering::SeqCst) {
@@ -214,15 +162,8 @@ impl Overlay {
 
             Ok(Overlay {
                 hwnd: Some(hwnd),
-                state: OverlayState::Hidden,
-                text: String::new(),
-                level: 0.0,
-                bars: [0.0; BARS],
-                phase: 0.0,
-                shown_at: Instant::now(),
+                m: OverlayModel::new(hint_key),
                 visible: false,
-                hint_key: hint_key.to_string(),
-                level_source: None,
                 scale,
                 width,
                 height,
@@ -244,50 +185,16 @@ impl Overlay {
 
     /// Hands the overlay the counter the capture thread writes peaks into.
     pub fn attach_level(&mut self, source: Arc<AtomicU32>) {
-        self.level_source = Some(source);
-    }
-
-    /// Takes the loudest sample since the last frame and clears the counter.
-    fn sample_level(&mut self) {
-        if let Some(src) = self.level_source.as_ref() {
-            let peak = src.swap(0, Ordering::Relaxed) as f32 / 1000.0;
-            self.set_level(peak);
-        }
+        self.m.attach_level(source);
     }
 
     /// Live microphone level from a raw sample peak, 0..1.
-    ///
-    /// The raw peak is a poor thing to draw directly. Ordinary speech into a
-    /// laptop microphone peaks around 0.05 to 0.3, so feeding it straight
-    /// through left every bar pinned to its minimum height and the trace
-    /// looked identical whether or not anyone was talking. A square root opens
-    /// out the quiet end, where speech actually lives, and the gain puts a
-    /// normal speaking voice near the top of the meter.
-    ///
-    /// Fast attack so a syllable registers at once, slow release so the trace
-    /// does not collapse between words.
     pub fn set_level(&mut self, peak: f32) {
-        let target = (peak.clamp(0.0, 1.0).sqrt() * 1.7).min(1.0);
-        self.level = if target > self.level {
-            self.level * 0.35 + target * 0.65
-        } else {
-            self.level * 0.80 + target * 0.20
-        };
+        self.m.set_level(peak);
     }
 
     pub fn set(&mut self, state: OverlayState, text: &str) {
-        if state != self.state {
-            self.shown_at = Instant::now();
-            if state == OverlayState::Listening {
-                self.level = 0.0;
-                self.bars = [0.0; BARS];
-            }
-        }
-        self.state = state;
-        if self.text != text {
-            self.text.clear();
-            self.text.push_str(text);
-        }
+        self.m.set(state, text);
         self.render();
     }
 
@@ -296,66 +203,24 @@ impl Overlay {
     /// Returns how long to wait before the next tick, or None when the screen
     /// is clear and the loop can go back to sleeping indefinitely.
     pub fn tick(&mut self) -> Option<Duration> {
-        match self.state {
-            OverlayState::Listening => {
-                self.sample_level();
-                self.advance();
+        match self.m.tick() {
+            Tick::Redraw(next) => {
                 self.render();
-                Some(LISTENING_TICK)
+                Some(next)
             }
-            OverlayState::Finalising => {
-                // Keep the trace moving as it settles, so the moment between
-                // release and text does not look like a freeze.
-                self.set_level(0.0);
-                self.advance();
-                self.render();
-                Some(LISTENING_TICK)
+            Tick::Wait(next) => Some(next),
+            Tick::Hide => {
+                self.set(OverlayState::Hidden, "");
+                None
             }
-            OverlayState::Done => {
-                if self.shown_at.elapsed() >= DONE_LINGER {
-                    self.set(OverlayState::Hidden, "");
-                    None
-                } else {
-                    Some(Duration::from_millis(120))
-                }
-            }
-            OverlayState::Error => {
-                if self.shown_at.elapsed() >= ERROR_LINGER {
-                    self.set(OverlayState::Hidden, "");
-                    None
-                } else {
-                    Some(Duration::from_millis(200))
-                }
-            }
-            OverlayState::Hidden => None,
-        }
-    }
-
-    /// One animation step. Each bar chases its own weight scaled by the live
-    /// level and a travelling wave, lagging by an amount that grows towards the
-    /// edges, which is what makes the trace look fluid rather than mechanical.
-    fn advance(&mut self) {
-        self.phase += 0.34;
-        if self.phase > std::f32::consts::TAU * 64.0 {
-            self.phase -= std::f32::consts::TAU * 64.0;
-        }
-        // A floor so the trace breathes gently rather than flatlining: a quiet
-        // room should not look like a broken application.
-        let energy = self.level.clamp(0.06, 1.0);
-        let centre = (BARS as f32 - 1.0) / 2.0;
-        for i in 0..BARS {
-            let from_centre = (i as f32 - centre).abs() / centre;
-            let wave = (self.phase - i as f32 * 0.55).sin() * 0.5 + 0.5;
-            let target = (energy * BAR_WEIGHT[i] * (0.40 + 0.60 * wave)).clamp(0.03, 1.0);
-            let lag = 0.55 - 0.12 * from_centre;
-            self.bars[i] += (target - self.bars[i]) * lag;
+            Tick::Idle => None,
         }
     }
 
     fn render(&mut self) {
         let Some(hwnd) = self.hwnd else { return };
         unsafe {
-            if self.state == OverlayState::Hidden {
+            if self.m.state == OverlayState::Hidden {
                 if self.visible {
                     let _ = ShowWindow(hwnd, SW_HIDE);
                     self.visible = false;
@@ -376,12 +241,8 @@ impl Overlay {
         let dc = g.mem_dc;
         let px = |v: f32| (v * s).round() as i32;
 
-        let accent = match self.state {
-            OverlayState::Done => COL_DONE,
-            OverlayState::Error => COL_ERROR,
-            _ => COL_ACCENT,
-        };
-        let live = matches!(self.state, OverlayState::Listening | OverlayState::Finalising);
+        let accent = colorref(self.m.accent());
+        let live = self.m.is_live();
 
         unsafe {
             let full = RECT { left: 0, top: 0, right: w, bottom: h };
@@ -390,9 +251,9 @@ impl Overlay {
         }
 
         // ---- recording dot -------------------------------------------------
-        let pad = px(17.0);
-        let dot_r = px(5.0);
-        let dot_dim = if self.state == OverlayState::Finalising { 0.55 } else { 1.0 };
+        let pad = px(model::PAD);
+        let dot_r = px(model::DOT_RADIUS);
+        let dot_dim = if self.m.state == OverlayState::Finalising { 0.55 } else { 1.0 };
         unsafe {
             let brush = CreateSolidBrush(dim(accent, dot_dim));
             let old_brush = SelectObject(dc, brush.into());
@@ -404,28 +265,24 @@ impl Overlay {
         }
 
         // ---- waveform ------------------------------------------------------
-        let bar_w = px(3.0).max(2);
-        let bar_gap = px(3.0).max(2);
-        let wave_left = pad + dot_r * 2 + px(13.0);
+        let bar_w = px(model::BAR_WIDTH).max(2);
+        let bar_gap = px(model::BAR_GAP).max(2);
+        let wave_left = pad + dot_r * 2 + px(model::DOT_TO_WAVE);
         let wave_w = bar_w * BARS as i32 + bar_gap * (BARS as i32 - 1);
         if live {
-            // Nearly the full height of the pill. The meter is the only part
-            // that answers "is it hearing me", so it is worth the room, and a
-            // low floor makes the difference between silence and speech large
-            // enough to catch out of the corner of an eye.
-            let max_h = px(26.0);
+            let max_h = px(model::BAR_MAX_HEIGHT);
             // RoundRect on a rectangle only a couple of pixels across
             // degenerates to nothing at all, so short bars are filled
             // rectangles and only tall ones get rounded ends.
-            let min_h = px(3.0).max(2);
+            let min_h = px(model::BAR_MIN_HEIGHT).max(2);
             for i in 0..BARS {
-                let value = self.bars[i].clamp(0.0, 1.0);
+                let value = self.m.bars[i].clamp(0.0, 1.0);
                 let bar_h = ((max_h as f32) * value).round().max(min_h as f32) as i32;
                 let x = wave_left + i as i32 * (bar_w + bar_gap);
                 let top = h / 2 - bar_h / 2;
                 // Taller bars brighter, so the trace has depth instead of
                 // being a row of identical marks.
-                let colour = dim(COL_WAVE, 0.42 + 0.58 * value);
+                let colour = dim(colorref(model::COL_WAVE), 0.42 + 0.58 * value);
                 unsafe {
                     let brush = CreateSolidBrush(colour);
                     if bar_h > bar_w * 3 {
@@ -446,20 +303,20 @@ impl Overlay {
         // ---- key hint on the right -----------------------------------------
         // Drawn before the text, so the text knows where it has to stop.
         let mut right_edge = w - pad;
-        if self.state == OverlayState::Listening {
+        if self.m.state == OverlayState::Listening {
             unsafe {
                 SelectObject(dc, g.hint_font.into());
             }
-            let cap_text: Vec<u16> = self.hint_key.encode_utf16().collect();
+            let cap_text: Vec<u16> = self.m.hint_key.encode_utf16().collect();
             let cap_text_w = measure(dc, &cap_text);
-            let cap_pad = px(7.0);
+            let cap_pad = px(model::KEYCAP_PAD);
             let cap_w = cap_text_w + cap_pad * 2;
-            let cap_h = px(20.0);
+            let cap_h = px(model::KEYCAP_HEIGHT);
             let cap_left = right_edge - cap_w;
             let cap_top = h / 2 - cap_h / 2;
 
             unsafe {
-                let brush = CreateSolidBrush(COL_KEYCAP);
+                let brush = CreateSolidBrush(colorref(model::COL_KEYCAP));
                 let old_brush = SelectObject(dc, brush.into());
                 let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
                 let _ = RoundRect(
@@ -468,14 +325,14 @@ impl Overlay {
                     cap_top,
                     cap_left + cap_w,
                     cap_top + cap_h,
-                    px(6.0),
-                    px(6.0),
+                    px(model::KEYCAP_RADIUS * 2.0),
+                    px(model::KEYCAP_RADIUS * 2.0),
                 );
                 SelectObject(dc, old_pen);
                 SelectObject(dc, old_brush);
                 let _ = DeleteObject(brush.into());
 
-                SetTextColor(dc, COL_KEYCAP_TEXT);
+                SetTextColor(dc, colorref(model::COL_KEYCAP_TEXT));
                 let mut buf = cap_text.clone();
                 let mut r = RECT {
                     left: cap_left + cap_pad,
@@ -488,44 +345,35 @@ impl Overlay {
 
             let hold: Vec<u16> = "Hold".encode_utf16().collect();
             let hold_w = measure(dc, &hold);
-            let hold_left = cap_left - px(8.0) - hold_w;
+            let hold_left = cap_left - px(model::HOLD_TO_KEYCAP) - hold_w;
             unsafe {
-                SetTextColor(dc, COL_HINT);
+                SetTextColor(dc, colorref(model::COL_HINT));
                 let mut buf = hold;
                 let mut r = RECT { left: hold_left, top: 0, right: cap_left, bottom: h };
                 DrawTextW(dc, &mut buf, &mut r, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
             }
-            right_edge = hold_left - px(14.0);
+            right_edge = hold_left - px(model::HINT_TO_TEXT);
         }
 
         // ---- the words -----------------------------------------------------
-        let text_left = if live { wave_left + wave_w + px(15.0) } else { wave_left };
-        let caret_space = if self.state == OverlayState::Listening { px(10.0) } else { 0 };
+        let text_left = if live { wave_left + wave_w + px(model::WAVE_TO_TEXT) } else { wave_left };
+        let caret_space = if self.m.state == OverlayState::Listening {
+            px(model::CARET_SPACE)
+        } else {
+            0
+        };
         let text_max = (right_edge - text_left - caret_space).max(0);
 
-        let body = match (self.text.trim(), self.state) {
-            ("", OverlayState::Listening) => "Listening".to_string(),
-            ("", OverlayState::Finalising) => "Transcribing".to_string(),
-            ("", OverlayState::Error) => "Nothing heard".to_string(),
-            ("", _) => String::new(),
-            (t, _) => t.to_string(),
-        };
+        let body = self.m.body();
 
         unsafe {
             SelectObject(dc, g.text_font.into());
-            SetTextColor(
-                dc,
-                match self.state {
-                    OverlayState::Listening if !self.text.trim().is_empty() => COL_TEXT_LIVE,
-                    OverlayState::Error => COL_HINT,
-                    _ => COL_TEXT,
-                },
-            );
+            SetTextColor(dc, colorref(self.m.text_colour()));
         }
 
         // Follow the tail. While someone keeps talking, the words that matter
         // are the ones just said, not the ones at the start of the sentence.
-        let (shown, clipped) = tail_that_fits(dc, &body, text_max);
+        let (shown, clipped) = model::tail_that_fits(&body, text_max, |s| measure_str(dc, s));
         let shown_w = measure_str(dc, &shown);
         if !shown.is_empty() {
             let mut buf: Vec<u16> = shown.encode_utf16().collect();
@@ -536,17 +384,18 @@ impl Overlay {
         }
 
         // Caret, right after the words: the same signal a text field gives.
-        if self.state == OverlayState::Listening {
-            let caret_x = (text_left + shown_w + px(5.0)).min(right_edge - px(2.0));
-            let caret_h = px(18.0);
+        if self.m.state == OverlayState::Listening {
+            let caret_x =
+                (text_left + shown_w + px(model::CARET_OFFSET)).min(right_edge - px(2.0));
+            let caret_h = px(model::CARET_HEIGHT);
             let caret = RECT {
                 left: caret_x,
                 top: h / 2 - caret_h / 2,
-                right: caret_x + px(2.0).max(1),
+                right: caret_x + px(model::CARET_WIDTH).max(1),
                 bottom: h / 2 + caret_h / 2,
             };
             unsafe {
-                let brush = CreateSolidBrush(COL_ACCENT);
+                let brush = CreateSolidBrush(colorref(model::COL_ACCENT));
                 FillRect(dc, &caret, brush);
                 let _ = DeleteObject(brush.into());
             }
@@ -555,11 +404,15 @@ impl Overlay {
         // ---- compose --------------------------------------------------------
         let pixels = unsafe { std::slice::from_raw_parts_mut(g.bits, (w * h * 4) as usize) };
 
-        // When the sentence is longer than the pill, the left edge of the text
-        // fades into the background rather than being chopped or prefixed with
-        // an ellipsis. It reads as words scrolling past a window.
         if clipped {
-            fade_into_background(pixels, w, h, text_left, text_left + px(34.0), BG_BYTES);
+            model::fade_into_background(
+                pixels,
+                w,
+                h,
+                text_left,
+                text_left + px(model::FADE_WIDTH),
+                BG_BYTES,
+            );
         }
         premultiply_with_mask(pixels, &g.mask);
 
@@ -575,7 +428,7 @@ impl Overlay {
         }
         let mut pos = POINT {
             x: work.left + (work.right - work.left - w) / 2,
-            y: work.bottom - h - px(78.0),
+            y: work.bottom - h - px(model::BOTTOM_MARGIN),
         };
         let mut size = SIZE { cx: w, cy: h };
         let mut src = POINT { x: 0, y: 0 };
@@ -627,9 +480,11 @@ impl Gdi {
                 CreateDIBSection(Some(mem_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
             SelectObject(mem_dc, bitmap.into());
 
-            let text_font = make_font(16.5 * scale, FW_MEDIUM.0 as i32, w!("Segoe UI"));
-            let hint_font = make_font(13.5 * scale, FW_SEMIBOLD.0 as i32, w!("Segoe UI"));
-            let bg_brush = CreateSolidBrush(COL_BG);
+            let text_font =
+                make_font(model::TEXT_FONT_HEIGHT * scale, FW_MEDIUM.0 as i32, w!("Segoe UI"));
+            let hint_font =
+                make_font(model::HINT_FONT_HEIGHT * scale, FW_SEMIBOLD.0 as i32, w!("Segoe UI"));
+            let bg_brush = CreateSolidBrush(colorref(model::COL_BG));
 
             ReleaseDC(None, screen_dc);
             Some(Gdi {
@@ -639,7 +494,7 @@ impl Gdi {
                 text_font,
                 hint_font,
                 bg_brush,
-                mask: rounded_mask(width, height, height / 2, 244),
+                mask: rounded_mask(width, height, height / 2, model::PILL_OPACITY),
             })
         }
     }
@@ -655,6 +510,21 @@ impl Drop for Gdi {
             let _ = DeleteDC(self.mem_dc);
         }
     }
+}
+
+/// A shared RGB colour as the 0x00BBGGRR word GDI wants.
+const fn colorref(rgb: [u8; 3]) -> COLORREF {
+    COLORREF((rgb[2] as u32) << 16 | (rgb[1] as u32) << 8 | rgb[0] as u32)
+}
+
+fn dim(colour: COLORREF, factor: f32) -> COLORREF {
+    let rgb = [
+        (colour.0 & 0xFF) as u8,
+        ((colour.0 >> 8) & 0xFF) as u8,
+        ((colour.0 >> 16) & 0xFF) as u8,
+    ];
+    let d = model::dim(rgb, factor);
+    COLORREF((d[2] as u32) << 16 | (d[1] as u32) << 8 | d[0] as u32)
 }
 
 fn make_font(height: f32, weight: i32, face: PCWSTR) -> HFONT {
@@ -693,74 +563,6 @@ fn measure(dc: HDC, text: &[u16]) -> i32 {
 fn measure_str(dc: HDC, s: &str) -> i32 {
     let utf16: Vec<u16> = s.encode_utf16().collect();
     measure(dc, &utf16)
-}
-
-/// The longest suffix of `text` that fits in `max_px`, on a word boundary where
-/// possible. Returns the suffix and whether anything was dropped.
-fn tail_that_fits(dc: HDC, text: &str, max_px: i32) -> (String, bool) {
-    if text.is_empty() || max_px <= 0 {
-        return (String::new(), false);
-    }
-    if measure_str(dc, text) <= max_px {
-        return (text.to_string(), false);
-    }
-    // Walk word starts back from the end: a handful of measurements on a
-    // sentence rather than one per character.
-    let mut best: Option<usize> = None;
-    let bytes = text.as_bytes();
-    let mut i = text.len();
-    while i > 0 {
-        i -= 1;
-        if bytes[i] == b' ' {
-            let candidate = i + 1;
-            if measure_str(dc, &text[candidate..]) <= max_px {
-                best = Some(candidate);
-            } else {
-                break;
-            }
-        }
-    }
-    if let Some(start) = best {
-        return (text[start..].to_string(), true);
-    }
-    // One very long word: fall back to character granularity.
-    let mut start = text.len();
-    for (idx, _) in text.char_indices().rev() {
-        if measure_str(dc, &text[idx..]) > max_px {
-            break;
-        }
-        start = idx;
-    }
-    (text[start..].to_string(), start > 0)
-}
-
-fn dim(colour: COLORREF, factor: f32) -> COLORREF {
-    let f = factor.clamp(0.0, 1.0);
-    let r = (colour.0 & 0xFF) as f32 * f;
-    let g = ((colour.0 >> 8) & 0xFF) as f32 * f;
-    let b = ((colour.0 >> 16) & 0xFF) as f32 * f;
-    COLORREF((b as u32) << 16 | (g as u32) << 8 | r as u32)
-}
-
-/// Blends pixels toward the pill background across a horizontal band: fully
-/// background at the left edge, untouched at the right.
-fn fade_into_background(pixels: &mut [u8], w: i32, h: i32, x0: i32, x1: i32, bg: [u8; 3]) {
-    let x0 = x0.max(0);
-    let x1 = x1.min(w);
-    if x1 <= x0 {
-        return;
-    }
-    let span = (x1 - x0) as f32;
-    for y in 0..h {
-        for x in x0..x1 {
-            let t = (x - x0) as f32 / span;
-            let i = ((y * w + x) * 4) as usize;
-            for c in 0..3 {
-                let src = pixels[i + c] as f32;
-                pixels[i + c] = (bg[c] as f32 * (1.0 - t) + src * t) as u8;
-            }
-        }
-    }
 }
 
 /// Coverage of a rounded rectangle, one byte per pixel, scaled by `opacity`.
@@ -858,94 +660,11 @@ mod tests {
         assert_eq!(px[7], 255);
     }
 
+    /// The shared colours are plain RGB; GDI wants them the other way round.
     #[test]
-    fn fade_reaches_the_background_and_leaves_the_rest() {
-        let (w, h) = (20, 4);
-        let mut px = vec![200u8; (w * h * 4) as usize];
-        let bg = [10u8, 20, 30];
-        fade_into_background(&mut px, w, h, 0, 10, bg);
-        assert_eq!(px[0], bg[0], "left edge is fully background");
-        assert_eq!(px[(15 * 4) as usize], 200, "beyond the band, untouched");
-    }
-
-    #[test]
-    fn level_attacks_fast_and_releases_slowly() {
-        let mut o = Overlay::disabled();
-        o.set_level(1.0);
-        assert!(o.level > 0.55, "a syllable registers immediately");
-        o.set_level(0.0);
-        assert!(o.level > 0.4, "and does not drop out between syllables");
-        for _ in 0..60 {
-            o.set_level(0.0);
-        }
-        assert!(o.level < 0.01, "but does settle to nothing");
-    }
-
-    #[test]
-    fn bars_never_flatline_and_stay_in_range() {
-        let mut o = Overlay::disabled();
-        for _ in 0..100 {
-            o.advance();
-        }
-        for b in o.bars {
-            assert!(b > 0.0 && b <= 1.0, "bar out of range: {b}");
-        }
-        assert!(o.bars.iter().all(|b| *b < 0.35), "silence should stay low");
-    }
-
-    /// The bug this guards against: the meter looked identical whether or not
-    /// anyone was speaking, because a raw microphone peak of 0.1 mapped to a
-    /// bar height below the minimum and every bar sat pinned at its floor.
-    #[test]
-    fn ordinary_speech_lifts_the_bars_well_clear_of_silence() {
-        let quiet = settled_peak(0.0);
-        // A laptop microphone at a normal speaking distance.
-        let speech = settled_peak(0.10);
-        let loud = settled_peak(0.30);
-
-        assert!(quiet < 0.15, "silence should sit low, got {quiet}");
-        assert!(
-            speech > quiet * 3.0,
-            "speech at 0.10 must clearly beat silence: {speech} against {quiet}"
-        );
-        assert!(
-            speech > 0.4,
-            "speech at 0.10 must use a real part of the meter, got {speech}"
-        );
-        assert!(loud > speech, "louder must read taller: {loud} against {speech}");
-    }
-
-    /// Drives the animation to a steady state at a given microphone peak and
-    /// returns the tallest bar, which is what the eye reads.
-    fn settled_peak(peak: f32) -> f32 {
-        let mut o = Overlay::disabled();
-        for _ in 0..60 {
-            o.set_level(peak);
-            o.advance();
-        }
-        let mut tallest: f32 = 0.0;
-        // Over a full cycle of the travelling wave, not one arbitrary frame.
-        for _ in 0..40 {
-            o.set_level(peak);
-            o.advance();
-            tallest = tallest.max(o.bars.iter().cloned().fold(0.0f32, f32::max));
-        }
-        tallest
-    }
-
-    #[test]
-    fn bars_respond_to_level() {
-        let mut loud = Overlay::disabled();
-        for _ in 0..40 {
-            loud.set_level(1.0);
-            loud.advance();
-        }
-        let mut quiet = Overlay::disabled();
-        for _ in 0..40 {
-            quiet.advance();
-        }
-        let loudest = loud.bars.iter().cloned().fold(0.0f32, f32::max);
-        let quietest = quiet.bars.iter().cloned().fold(0.0f32, f32::max);
-        assert!(loudest > quietest * 2.0, "loud must read taller");
+    fn colours_survive_the_trip_to_gdi() {
+        assert_eq!(colorref(model::COL_ACCENT).0, 0x00_3C_60_F0);
+        assert_eq!(colorref(model::COL_BG).0, 0x00_1C_1D_1E);
+        assert_eq!(colorref(model::COL_KEYCAP).0, 0x00_36_38_3A);
     }
 }
