@@ -11,7 +11,7 @@
 //!    That caps the key-up wait at whatever call was already running.
 
 use crate::asr::{join, Line, Transcriber};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -72,37 +72,7 @@ struct Staging {
     buf: Vec<f32>,
 }
 
-/// Where to post a wake-up when an event is queued, so the UI thread can sit
-/// in a blocking wait instead of polling. Zero means nobody is listening.
-#[derive(Clone, Default)]
-pub struct Waker {
-    thread_id: Arc<AtomicU32>,
-    message: u32,
-}
-
-impl Waker {
-    pub fn for_current_thread(message: u32) -> Waker {
-        let id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-        Waker {
-            thread_id: Arc::new(AtomicU32::new(id)),
-            message,
-        }
-    }
-
-    fn wake(&self) {
-        let id = self.thread_id.load(Ordering::Relaxed);
-        if id != 0 {
-            unsafe {
-                let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
-                    id,
-                    self.message,
-                    windows::Win32::Foundation::WPARAM(0),
-                    windows::Win32::Foundation::LPARAM(0),
-                );
-            }
-        }
-    }
-}
+pub use crate::platform::sys::Waker;
 
 pub struct AsrService {
     cmd: Sender<Cmd>,
@@ -258,16 +228,7 @@ impl Drop for AsrService {
     }
 }
 
-/// Nudges the calling thread above normal priority. Best effort: if the call
-/// fails the worker simply runs at the default priority.
-fn raise_priority() {
-    use windows::Win32::System::Threading::{
-        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
-    };
-    unsafe {
-        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-    }
-}
+use crate::platform::sys::raise_priority;
 
 fn worker_loop(
     transcriber: Transcriber,

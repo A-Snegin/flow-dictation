@@ -1,36 +1,15 @@
 //! Latency instrumentation.
 //!
 //! The trace points are the ones the brief names, T0 to T12, timed with
-//! `QueryPerformanceCounter` so they are consistent across threads and immune
+//! the platform monotonic counter so they are consistent across threads and immune
 //! to wall-clock adjustments. Every utterance appends one JSON line locally and
 //! nothing ever leaves the machine.
 
 use std::sync::Mutex;
 
-use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+pub use crate::platform::sys::{freq, now};
 
 use crate::stats::Samples;
-
-/// Raw counter ticks.
-pub fn now() -> i64 {
-    let mut t = 0i64;
-    unsafe {
-        let _ = QueryPerformanceCounter(&mut t);
-    }
-    t
-}
-
-pub fn freq() -> i64 {
-    let mut f = 0i64;
-    unsafe {
-        let _ = QueryPerformanceFrequency(&mut f);
-    }
-    if f == 0 {
-        1
-    } else {
-        f
-    }
-}
 
 pub fn ms_between(a: i64, b: i64) -> f64 {
     (b - a) as f64 * 1000.0 / freq() as f64

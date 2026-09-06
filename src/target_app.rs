@@ -11,49 +11,12 @@
 //! the Enter key, and dictating "new paragraph" would run whatever is on the
 //! command line. Inside a terminal, line breaks are replaced rather than sent.
 
-use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-};
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+/// Executable name (Windows) or window class (Linux) of the window that
+/// currently has focus, lowercased. Empty when it cannot be determined, which
+/// callers treat as "not a terminal".
+pub use crate::platform::target_app::foreground_executable;
 
-/// Executable name of the window that currently has focus, lowercased.
-/// Empty when it cannot be determined, which callers treat as "not a terminal".
-pub fn foreground_executable() -> String {
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.is_invalid() {
-            return String::new();
-        }
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 {
-            return String::new();
-        }
-        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return String::new();
-        };
-        let mut buf = [0u16; MAX_PATH as usize];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_FORMAT(0),
-            windows::core::PWSTR(buf.as_mut_ptr()),
-            &mut len,
-        )
-        .is_ok();
-        let _ = CloseHandle(handle);
-        if !ok {
-            return String::new();
-        }
-        String::from_utf16_lossy(&buf[..len as usize])
-            .rsplit('\\')
-            .next()
-            .unwrap_or_default()
-            .to_lowercase()
-    }
-}
-
+#[cfg(windows)]
 /// Terminals and shells, where Enter runs things and paste is unreliable.
 pub const DEFAULT_TERMINALS: &[&str] = &[
     "windowsterminal.exe",
@@ -72,6 +35,9 @@ pub const DEFAULT_TERMINALS: &[&str] = &[
     "putty.exe",
     "mstsc.exe",
 ];
+
+#[cfg(target_os = "linux")]
+pub use crate::platform::target_app::DEFAULT_TERMINALS;
 
 pub fn is_terminal(exe: &str, extra: &[String]) -> bool {
     if exe.is_empty() {
@@ -109,6 +75,7 @@ pub fn strip_newlines(text: &str, replacement: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn recognises_shells() {
         assert!(is_terminal("powershell.exe", &[]));

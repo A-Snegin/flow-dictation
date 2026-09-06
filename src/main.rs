@@ -20,21 +20,35 @@ use flow::overlay::{Overlay, OverlayState};
 use flow::settings::{Insertion, Settings};
 use flow::target_app;
 use flow::trace::{self, Utterance};
+#[cfg(windows)]
 use flow::tray::{Tray, TrayCommand};
 
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage,
     MWMO_INPUTAVAILABLE, MSG, PM_REMOVE, QS_ALLINPUT,
 };
+#[cfg(windows)]
+use flow::platform::sys::WM_FLOW_WAKE;
 
-/// Posted to the message thread whenever there is something to service, so the
-/// loop can block rather than poll. Polling cost 1.4% of a core at idle and put
-/// up to 2 ms between the final transcript and the paste.
-const WM_FLOW_WAKE: u32 = 0x0400 + 2;
+/// One waker for the whole process: the hotkey listener and the ASR worker
+/// both poke it, and the main loop blocks on it. On Windows it posts a thread
+/// message; on Linux it is an eventfd.
+fn main_waker() -> Waker {
+    #[cfg(windows)]
+    {
+        Waker::for_current_thread(WM_FLOW_WAKE)
+    }
+    #[cfg(not(windows))]
+    {
+        Waker::new()
+    }
+}
 
 fn main() {
     // Before any window exists: otherwise the overlay is drawn at 96 dpi and
     // scaled up by the compositor, which looks soft on a scaled display.
+    #[cfg(windows)]
     unsafe {
         let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
             windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -56,6 +70,7 @@ fn main() {
             let text = if args.len() > 2 { args[2..].join(" ") } else { String::new() };
             return overlay_demo(secs, &text);
         }
+        #[cfg(windows)]
         Some("--settings") => {
             // Opens just the settings window, with no recogniser behind it.
             // Useful for checking the layout, and a way in if the tray icon is
@@ -79,6 +94,7 @@ fn main() {
             }
             return;
         }
+        #[cfg(windows)]
         Some("--settings-selftest") => {
             let text = args[1..].join("
 ");
@@ -91,6 +107,21 @@ fn main() {
             e.sort();
             for (k, v) in e {
                 println!("  \"{k}\" -> \"{v}\"");
+            }
+            return;
+        }
+        #[cfg(not(windows))]
+        Some("--key") | Some("--ctl") => {
+            // Client side of the control socket: `flow-core --key down` from a
+            // compositor keybind, or `--ctl toggle|cancel|reload|report|quit`.
+            let cmd = args.get(1).map(String::as_str).unwrap_or("");
+            if cmd.is_empty() {
+                eprintln!("usage: flow-core --key down|up|cancel|toggle|reload|report|quit");
+                std::process::exit(2);
+            }
+            if let Err(e) = hotkey::send_command(cmd) {
+                eprintln!("flow-core is not running ({e})");
+                std::process::exit(1);
             }
             return;
         }
@@ -120,7 +151,9 @@ fn main() {
                  flow-core --dictate N    capture N seconds, transcribe, print (no insertion)
                  flow-core --which-app    report the focused app and how text would be inserted
                  flow-core --overlay-demo N  drive the pill with a synthetic voice for N seconds
-                 flow-core --settings     open the settings window on its own
+                 flow-core --settings     open the settings window on its own (Windows)
+                 flow-core --key down|up  hold-key edge from a compositor keybind (Linux)
+                 flow-core --ctl CMD      toggle | cancel | reload | report | quit (Linux)
                  flow-core --dictionary \"text\"  show what the dictionary does to a phrase"
             );
             return;
@@ -142,7 +175,7 @@ fn main() {
     let (model_dir, arch) = settings.resolve_model();
     if !model_dir.join("streaming_config.json").exists() {
         eprintln!(
-            "No model at {}.\nRun scripts\\fetch-model.ps1 to download it.",
+            "No model at {}.\nRun scripts/fetch-model.sh (Linux) or scripts\\fetch-model.ps1 (Windows) to download it.",
             model_dir.display()
         );
         std::process::exit(1);
@@ -226,6 +259,7 @@ fn main() {
     let _ = transcriber.transcribe_once(&mut warm, 16_000);
 
     let sink_for_app = sink.clone();
+    let waker = main_waker();
     let asr = Arc::new(AsrService::spawn_with(
         transcriber,
         Config {
@@ -234,15 +268,24 @@ fn main() {
             release_tail: Duration::from_millis(settings.model.release_tail_ms),
         },
         sink,
-        Waker::for_current_thread(WM_FLOW_WAKE),
+        waker.clone(),
     ));
 
     // ---- Hotkey hook and tray, both on this thread -----------------------
     let (hk_tx, hk_rx) = channel::<HotkeyEvent>();
+    #[cfg(windows)]
     let hook = match hotkey::install(hotkey_vk, hk_tx, WM_FLOW_WAKE) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("could not install the hotkey hook: {e}");
+            std::process::exit(1);
+        }
+    };
+    #[cfg(not(windows))]
+    let hook = match hotkey::install(hotkey_vk, hk_tx, waker.clone()) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("could not start the hotkey listener: {e}");
             std::process::exit(1);
         }
     };
@@ -251,6 +294,7 @@ fn main() {
         Overlay::disabled()
     });
     overlay.attach_level(Arc::clone(&level));
+    #[cfg(windows)]
     let mut tray = Tray::create().unwrap_or_else(|e| {
         eprintln!("tray unavailable, continuing without it: {e}");
         Tray::disabled()
@@ -300,16 +344,20 @@ fn main() {
         level,
         peak_seen,
         overlay,
+        waker: waker.clone(),
+        quit: false,
     };
 
     // Notice edits made outside the app: someone with the file open in an
     // editor should not have to know that only the window counts.
     let mut settings_stamp = Settings::modified();
 
-    // ---- Message pump ----------------------------------------------------
-    // The hook needs this thread pumping messages or it never fires. The loop
-    // blocks until something arrives: a Windows message, or a wake posted by
-    // the hook or the ASR worker. The 250 ms timeout is only a safety net.
+    // ---- Main loop ----------------------------------------------------------
+    // On Windows the hook needs this thread pumping messages or it never
+    // fires. The loop blocks until something arrives: a Windows message, or a
+    // wake posted by the hook or the ASR worker. On Linux it blocks on the
+    // eventfd the hotkey listener and the ASR worker write to.
+    #[cfg(windows)]
     let mut msg = MSG::default();
     loop {
         // While the pill is up, wake often enough to animate the meter.
@@ -323,6 +371,7 @@ fn main() {
             .map(|d| d.as_millis() as u32)
             .unwrap_or(2_000);
 
+        #[cfg(windows)]
         unsafe {
             MsgWaitForMultipleObjectsEx(None, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -330,9 +379,14 @@ fn main() {
                 DispatchMessageW(&msg);
             }
         }
+        #[cfg(not(windows))]
+        {
+            app.waker.wait(Duration::from_millis(wait as u64));
+        }
 
+        #[cfg(windows)]
         match tray.poll() {
-            Some(TrayCommand::Quit) => break,
+            Some(TrayCommand::Quit) => app.quit = true,
             Some(TrayCommand::Toggle) => {
                 app.enabled = !app.enabled;
                 if !app.enabled {
@@ -374,7 +428,11 @@ fn main() {
         if file_changed {
             settings_stamp = stamp;
         }
-        if flow::settings_ui::take_saved() || file_changed {
+        #[cfg(windows)]
+        let saved_from_ui = flow::settings_ui::take_saved();
+        #[cfg(not(windows))]
+        let saved_from_ui = false;
+        if saved_from_ui || file_changed {
             let (fresh, problem) = Settings::load();
             if let Some(p) = problem {
                 eprintln!("settings: {p}");
@@ -393,6 +451,9 @@ fn main() {
 
         app.pump_hotkey(&hk_rx);
         app.pump_asr();
+        if app.quit {
+            break;
+        }
     }
 
     hotkey::uninstall(hook);
@@ -420,6 +481,9 @@ struct App {
     /// The same peaks, cleared once per utterance for the trace.
     peak_seen: Arc<AtomicU32>,
     overlay: Overlay,
+    /// Handed to a rebuilt ASR worker so it keeps waking this loop.
+    waker: Waker,
+    quit: bool,
 }
 
 impl App {
@@ -463,7 +527,7 @@ impl App {
         let (dir, arch) = fresh.resolve_model();
         if !dir.join("streaming_config.json").exists() {
             eprintln!(
-                "no model at {}. Run scripts\\fetch-model.ps1 for the {} profile.",
+                "no model at {}. Run scripts/fetch-model.sh or scripts\\fetch-model.ps1 for the {} profile.",
                 dir.display(),
                 fresh.model.profile
             );
@@ -514,7 +578,7 @@ impl App {
                 release_tail: Duration::from_millis(fresh.model.release_tail_ms),
             },
             self.sink.clone(),
-            Waker::for_current_thread(WM_FLOW_WAKE),
+            self.waker.clone(),
         ));
         self.sink.clear();
         self.loaded_profile = fresh.model.profile.clone();
@@ -532,10 +596,33 @@ impl App {
             match rx.try_recv() {
                 Ok(HotkeyEvent::Down) => self.start(),
                 Ok(HotkeyEvent::Up) => self.stop(),
+                Ok(HotkeyEvent::Cancel) => self.cancel(),
+                Ok(HotkeyEvent::Toggle) => self.toggle(),
+                Ok(HotkeyEvent::Reload) => {
+                    let (fresh, problem) = Settings::load();
+                    if let Some(p) = problem {
+                        eprintln!("settings: {p}");
+                    } else {
+                        self.apply(&fresh);
+                        println!("Reloaded {} dictionary entries.", fresh.dictionary.len());
+                    }
+                }
+                Ok(HotkeyEvent::Report) => println!("\n{}\n", trace::report()),
+                Ok(HotkeyEvent::Quit) => self.quit = true,
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => return,
             }
         }
+    }
+
+    /// Pause or resume. Paused, the key does nothing and any utterance in
+    /// flight is dropped.
+    fn toggle(&mut self) {
+        self.enabled = !self.enabled;
+        if !self.enabled {
+            self.cancel();
+        }
+        println!("Dictation {}", if self.enabled { "enabled" } else { "paused" });
     }
 
     fn start(&mut self) {
@@ -918,7 +1005,9 @@ fn overlay_demo(secs: u64, text: &str) {
 
         // A layered window still needs its thread to pump messages, or the
         // compositor treats the window as unresponsive and never shows it.
+        #[cfg(windows)]
         let mut msg = MSG::default();
+        #[cfg(windows)]
         unsafe {
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);

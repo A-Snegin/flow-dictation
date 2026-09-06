@@ -236,17 +236,44 @@ impl Settings {
     }
 }
 
-/// %APPDATA%\Flow: settings and anything the user edits.
+/// Settings and anything the user edits.
+/// Windows: %APPDATA%\Flow. Linux: $XDG_CONFIG_HOME/flow (~/.config/flow).
 pub fn data_root() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("Flow")
+    #[cfg(windows)]
+    {
+        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+        PathBuf::from(base).join("Flow")
+    }
+    #[cfg(not(windows))]
+    {
+        xdg_dir("XDG_CONFIG_HOME", ".config").join("flow")
+    }
 }
 
-/// %LOCALAPPDATA%\Flow: models, traces, anything large or machine-local.
-/// Kept off OneDrive on purpose; sync churn costs measurable CPU.
+/// Models, traces, anything large or machine-local.
+/// Windows: %LOCALAPPDATA%\Flow, kept off OneDrive on purpose; sync churn costs
+/// measurable CPU. Linux: $XDG_DATA_HOME/flow (~/.local/share/flow).
 pub fn local_root() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("Flow")
+    #[cfg(windows)]
+    {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+        PathBuf::from(base).join("Flow")
+    }
+    #[cfg(not(windows))]
+    {
+        xdg_dir("XDG_DATA_HOME", ".local/share").join("flow")
+    }
+}
+
+#[cfg(not(windows))]
+fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
+    if let Ok(v) = std::env::var(var) {
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(fallback)
 }
 
 pub fn models_root() -> PathBuf {

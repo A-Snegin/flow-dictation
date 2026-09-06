@@ -18,11 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HotkeyEvent {
-    Down,
-    Up,
-}
+pub use crate::control::HotkeyEvent;
 
 /// Virtual key codes worth binding. Right Ctrl is the default: one key, easy
 /// to hold, and Ctrl combinations still pass through because we never swallow
