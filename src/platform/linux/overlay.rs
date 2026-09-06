@@ -731,13 +731,11 @@ struct Face<'a> {
 
 impl<'a> Face<'a> {
     /// `cell_px` is the height `CreateFontW` would have been given on Windows:
-    /// ascent plus descent, not the em size. Matching that is what keeps the
-    /// two platforms' text the same size.
+    /// ascent plus descent, not the em size. `PxScale` happens to mean exactly
+    /// the same thing, so the two platforms' text comes out the same size from
+    /// the same number.
     fn new(font: &'a FontVec, cell_px: f32) -> Face<'a> {
-        let upem = font.units_per_em().unwrap_or(1000.0);
-        let cell = font.height_unscaled().max(1.0);
-        let em_px = cell_px * upem / cell;
-        Face { scaled: font.as_scaled(PxScale::from(em_px)) }
+        Face { scaled: font.as_scaled(PxScale::from(cell_px)) }
     }
 
     /// Width of a string in device pixels, advances and kerning included.
