@@ -33,6 +33,10 @@ path = "src/bin/insert_test.rs"
 name = "wer"
 path = "src/bin/wer.rs"
 
+[[bin]]
+name = "flow-ctl"
+path = "src/bin/flow_ctl.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
