@@ -84,6 +84,14 @@ mod tests {
         assert!(!is_terminal("", &[]));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recognises_shells() {
+        assert!(is_terminal("alacritty", &[]));
+        assert!(!is_terminal("firefox", &[]));
+        assert!(!is_terminal("", &[]));
+    }
+
     #[test]
     fn honours_extra_entries() {
         let extra = vec!["myshell.exe".to_string()];
