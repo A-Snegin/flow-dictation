@@ -91,12 +91,18 @@ Settings live at `~/.config/flow/settings.toml`, the model and traces at
 `~/.local/share/flow`. Both paths follow `XDG_CONFIG_HOME` and
 `XDG_DATA_HOME` when set.
 
-Insertion defaults to Type (`wtype`), which never touches the clipboard.
-Setting `insertion.mode = "paste"` puts the text on the clipboard for a
-moment before sending Ctrl+V; a clipboard history tool such as cliphist will
-see it, since nothing on Linux has an equivalent of the Windows
-"exclude from clipboard history" flags. Type mode avoids that entirely and is
-what terminals use regardless of the setting.
+Insertion works as on Windows: paste into applications, type into terminals.
+Paste puts the text on the clipboard for a moment, sends Ctrl+V, then puts
+the old clipboard back. A clipboard history tool such as cliphist will see
+the dictation, since nothing on Linux has an equivalent of the Windows
+"exclude from clipboard history" flags. Set `insertion.mode = "type"` to
+avoid the clipboard entirely; typing goes through `wtype` and costs about
+4.5 ms a character, which is why it is not the default.
+
+Measured on the same Ryzen 7 7735U under Omarchy, small model: ready in
+150 ms after launch, 220 MB resident in one process, key release to text
+19 ms when the recogniser has kept up with the sentence, 582 ms on a long
+passage fed faster than speech. Mic arm to first sample 15 ms.
 
 ## Using it
 
