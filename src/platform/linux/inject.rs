@@ -98,11 +98,11 @@ fn paste(text: &str) -> Result<(), String> {
 /// Unicode keystrokes via wtype, text piped over stdin so it never touches
 /// argv (no `ps` leak, no shell history entry).
 fn type_text(text: &str) -> Result<(), String> {
-    // wtype sleeps between keystrokes unless told not to: 60 characters cost
-    // 275 ms with the default delay and 2 ms with none. Nothing we type needs
-    // the pause; the compositor delivers the events in order regardless.
+    // wtype costs about 4.5 ms per character (a compositor round trip each),
+    // so 60 characters take roughly 270 ms. That is why paste is the default
+    // outside terminals; an in-process virtual keyboard is the eventual fix.
     let mut child = Command::new("wtype")
-        .args(["-d", "0", "-"])
+        .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

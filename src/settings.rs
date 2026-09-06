@@ -105,10 +105,10 @@ impl Default for Model {
 impl Default for Insertion {
     fn default() -> Self {
         Insertion {
-            // Paste is flat in length on Windows. On Wayland the paste path
-            // goes through the clipboard daemon and any clipboard manager sees
-            // the dictation, so typing through wtype is the default there.
-            mode: if cfg!(windows) { "paste" } else { "type" }.into(),
+            // Paste is flat in length on both platforms; typing through wtype
+            // on Wayland costs about 4.5 ms per character. Terminals still get
+            // typed into, where paste bindings are unreliable.
+            mode: "paste".into(),
             terminal_mode: "type".into(),
             terminal_apps: Vec::new(),
             terminal_newline_replacement: " ".into(),
@@ -198,8 +198,8 @@ impl Settings {
              #                       Flow over its control socket, so this only labels the pill)\n\
              # model.profile         fast (tiny, about twice as quick) | balanced (small)\n\
              # model.single_thread   true is both faster at the tail and far lighter on CPU\n\
-             # insertion.mode        paste (Windows default, flat cost) | type (Linux default;\n\
-             #                       on Wayland typing goes through wtype and paste through wl-copy)\n\
+             # insertion.mode        paste (default, flat cost) | type (for apps that block paste;\n\
+             #                       on Wayland typing goes through wtype at about 4.5 ms a character)\n\
              # insertion.terminal_mode  how to insert into PowerShell, cmd, Windows Terminal, alacritty and\n\
              #                       friends. Typing is the default there, and line breaks are\n\
              #                       replaced with a space so a dictation can never run a command.\n\
